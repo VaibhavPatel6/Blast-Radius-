@@ -42,6 +42,7 @@ def main() -> int:
                                          "spawned": set(), "cpu": 0.0, "ok": True, "children": 0,
                                          "touched": set()})
             r["touched"].update(tuple(c) for c in d.get("touched", []))
+            r.setdefault("wrapped", set()).update(tuple(c) for c in d.get("wrapped", []))
             for f, ls in d["lines"].items():
                 r["lines"].setdefault(f, set()).update(ls)
             r["code"].update(tuple(c) for c in d["code"])
@@ -73,7 +74,8 @@ def main() -> int:
     per_file: dict[str, dict] = {}
 
     def entry(path: str) -> dict:
-        return per_file.setdefault(rel(path), {"lines": {}, "code": {}, "opened": set(), "touched": {}})
+        return per_file.setdefault(rel(path), {"lines": {}, "code": {}, "opened": set(), "touched": {},
+                                               "touched_run": {}, "wrapped": {}})
 
     listed: dict[str, set] = {}
     for tid, r in records.items():
@@ -86,8 +88,12 @@ def main() -> int:
             entry(f)["code"].setdefault(f"{qual}@{first}", set()).add(i)
         for f in r["opened"]:
             entry(f)["opened"].add(i)
-        for f, qual, first, name in r["touched"]:
+        for f, qual, first, name in r.get("wrapped", ()):
+            entry(f)["wrapped"].setdefault(f"{qual}@{first}", set()).add(name)
+        for f, qual, first, name, *phase in r["touched"]:
             entry(f)["touched"].setdefault(f"{qual}@{first}", {}).setdefault(name, set()).add(i)
+            if phase and phase[0] == "run":
+                entry(f)["touched_run"].setdefault(f"{qual}@{first}", {}).setdefault(name, set()).add(i)
         for d in r["listed"]:
             listed.setdefault(d[len(PREFIX):] if d.startswith(PREFIX) else "", set()).add(i)
 
@@ -101,6 +107,9 @@ def main() -> int:
             "opened": intern(e["opened"]),
             "touched": {k: {n: intern(v) for n, v in sorted(names.items())}
                         for k, names in sorted(e["touched"].items())},
+            "touched_run": {k: {n: intern(v) for n, v in sorted(names.items())}
+                            for k, names in sorted(e["touched_run"].items())},
+            "wrapped": {k: sorted(v) for k, v in sorted(e["wrapped"].items())},
         }, separators=(",", ":")))
     (out / "index.json").write_text(json.dumps({
         "ids": ids,

@@ -153,6 +153,17 @@ are then the tests that read one of those attributes, from a map recorded by run
 every test alone with each class attribute replaced by a stand-in that notes its first
 read (`COVMAP_CLASSES=1` in `tools/covmap/recorder.py`).
 
+Each recorded read is also tagged with its phase: "import" when the nearest relevant
+frame is a sqlglot module body (a metaclass or class body consuming the value while a
+module is imported, even if a test triggered that import), "run" otherwise. Import-time
+reads leave their results in class attributes and module-level data. So when the first
+comparison finds readers that only read at import, a second comparison imports every
+sqlglot module on both sides and fingerprints all classes and all module-level data; if
+nothing differs beyond attributes whose test-time readers are recorded, only those
+test-time readers can observe the change (for example, a Snowflake tokenizer setting read
+by the dialect's metaclass at import: 1,088 importers, 273 test-time readers). Any
+difference in module-level data, which has no read map, keeps the wider set.
+
 Falls back to every importer when: a class or attribute exists on one side only; the
 class is an enum, dataclass or named tuple; a changed attribute is one the read recorder
 does not wrap (special `__names__` such as `__init__`, whose defaults live in the class
@@ -164,7 +175,7 @@ Fingerprints compare values, not identities: functions by their code (ignoring l
 numbers), defaults and closure contents; bound methods also by the object they are bound
 to (`exp.A.from_arg_list` differs from `exp.B.from_arg_list`). Tables keyed by strings,
 numbers or enum members are compared in order, since sqlglot iterates some of them in
-order. Tables keyed by classes are compared by content only: they are often built by
+order. Tables keyed by classes, and sequences made only of classes, are compared by content only: they are often built by
 iterating sets of classes, whose order follows memory addresses and differs between two
 imports. Both sides are forked from the same process, so they share a hash seed; a no-op
 comparison of typical modules reports no differences.

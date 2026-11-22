@@ -29,6 +29,9 @@ VERIFY_UNTIL = 100
 # Slow tests that cost less to run than to list, with their estimated scorer CPU (ms):
 # measured 1.0–1.44 s on quiet local runs in our child, times 1.5 for the scorer, plus margin.
 RUN_WHEN_CANDIDATE = {"tests/test_generator.py::TestGenerator::test_generator_memory": 2500}
+# The TPC comparison (br/tpc.py) is off until its reworked version is merged: on practice
+# it never fired (S4' = S3 to the millisecond), so leaving the tests listed costs nothing measured.
+TPC_CHECK = False
 # Seconds allowed for computing one side of the TPC preparation comparison.
 TPC_TIMEOUT = 40
 # Seconds allowed for each side of a class-state comparison (import plus fingerprint).
@@ -126,6 +129,32 @@ class Verifier:
     def __init__(self, started: float):
         self.started = started
         self.preimported = False
+        self.warm = None
+
+    def warm_run(self, commit: str, changes, tests: list[dict]) -> dict:
+        """Run tests in a worker forked from the warm zygote, with patched function bodies
+        swapped in (br/warm.py). The caller has checked the patch is eligible."""
+        from br.verify import WATCHDOG_CLASS_SETUP, WATCHDOG_FACTOR, WATCHDOG_FLOOR
+        from br.warm import Warm
+
+        if self.warm is None:
+            self.warm = Warm()
+        payload = [{"path": ch.old_path, "old": ch.old_text, "new": ch.new_text} for ch in changes]
+        seconds = {t["id"]: t["seconds"] for t in tests}
+        order = sorted(tests, key=lambda t: (t["id"].rsplit("::", 1)[0], t["seconds"]))
+        seen = set()
+
+        def budget(test_id: str, first: bool) -> float:
+            cls = test_id.rsplit("::", 1)[0]
+            extra = WATCHDOG_CLASS_SETUP if cls not in seen else 0.0
+            seen.add(cls)
+            return WATCHDOG_FLOOR + WATCHDOG_FACTOR * seconds[test_id] + extra
+
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        result = self.warm.run(payload, order, budget, self.started + VERIFY_HARD_STOP)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        result["why"] = f"warm cpu {after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime:.2f}s {result['why']}"
+        return result
 
     def has_time(self) -> bool:
         return time.monotonic() - self.started < VERIFY_UNTIL
@@ -207,19 +236,52 @@ def narrow_class_edits(commit: str, changes, class_edits: list[dict], maps, veri
         remove_tree(tree)
     if changed is None:
         return importers, "class edits: importers (an import failed or timed out)"
+    readers, problem = _readers_of(changed, maps, run_only=False)
+    if problem:
+        return importers, problem
+    note = f"class edits: {sum(len(v) for v in changed.values())} attributes changed in {len(changed)} classes -> {len(readers)} readers"
+    # Reads made at import (a metaclass or class body consuming the value) leave their
+    # results in class and module state. If every sqlglot module, imported on both sides,
+    # shows no difference beyond attributes whose test-time readers we know, only those
+    # test-time readers can observe the change.
+    run_readers, problem = _readers_of(changed, maps, run_only=True)
+    if problem or run_readers == readers or not verifier.has_time():
+        return readers, note
+    tree = Path("/tmp/br") / (commit + "-state-all")
+    try:
+        remove_tree(tree)
+        build_tree(tree, changes)
+        everything = changed_attributes(str(PINNED), str(tree), ["*"], PROBE_TIMEOUT)
+    except Exception:
+        everything = None
+    finally:
+        remove_tree(tree)
+    if everything is None:
+        return readers, note
+    run_all, problem = _readers_of(everything, maps, run_only=True)
+    if problem:
+        return readers, note + " (full import: " + problem + ")"
+    return run_all, note + f"; full-import comparison: {len(run_all)} test-time readers"
+
+
+def _readers_of(changed: dict, maps, run_only: bool) -> tuple[set[str], str]:
     readers: set[str] = set()
     for (module, qual), names in sorted(changed.items()):
         if "*" in names or "__kind__" in names:
-            return importers, f"class edits: importers ({module}:{qual} gained or lost a member)"
+            return set(), f"class edits: importers ({module}:{qual} gained or lost a member)"
         path = module_file(module)
         if path is None:
-            return importers, f"class edits: importers (no file for {module})"
+            return set(), f"class edits: importers (no file for {module})"
+        wrapped = maps.wrapped(path, qual)
         for name in sorted(names):
-            got = maps.readers(path, qual, name)
+            if wrapped is None or name not in wrapped:
+                # the recorder never instrumented this name, so its readers are unknown
+                return set(), f"class edits: importers ({module}:{qual}.{name} has no read records)"
+            got = maps.readers_run(path, qual, name) if run_only else maps.readers(path, qual, name)
             if got is None:
-                return importers, f"class edits: importers (no read records for {path})"
+                return set(), f"class edits: importers (no read records for {path})"
             readers |= got
-    return readers, f"class edits: {sum(len(v) for v in changed.values())} attributes changed in {len(changed)} classes -> {len(readers)} readers"
+    return readers, ""
 
 
 def answer_cost(numbers: list[int], durations: dict[int, int]) -> int:
@@ -229,6 +291,7 @@ def answer_cost(numbers: list[int], durations: dict[int, int]) -> int:
 
 _TPC_EXECUTION: set | None = None
 _IMPORT_TIME: set | None = None
+_TPC_QUERIES: dict | None = None
 # A function entered by nearly every test run alone is almost certainly run at import.
 IMPORT_LIKE_ENTRANTS = 1500
 
@@ -238,6 +301,8 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
     """Drop the TPC executor tests when what sqlglot prepares before execution is unchanged
     (br/tpc.py). Only for patches that change function code alone, none of it run during
     execution, and touch nothing else those tests depend on."""
+    if not TPC_CHECK:
+        return chosen, ""
     global _TPC_EXECUTION
     from br.tpc import REFUSE_PREFIXES, TPC_TESTS, same_as_pinned
     from br.verify import build_tree, remove_tree
@@ -264,6 +329,16 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
         return chosen, " | tpc: kept (changed code runs at import)"
     if maps is None or any(len(maps.entered(p, q, n)) > IMPORT_LIKE_ENTRANTS for p, q, n, _ in changed_objects):
         return chosen, " | tpc: kept (changed code entered by nearly every test)"
+    # Every query is prepared on both sides, in the order the test uses. (A per-query
+    # shortcut is being rebuilt on its own branch; when no query's recorded preparation
+    # reaches the change, the change is unexplained and the test stays listed.)
+    global _TPC_QUERIES
+    if _TPC_QUERIES is None:
+        _TPC_QUERIES = json.loads((APP / "maps" / "tpc_queries.json").read_text())
+    keys = [f"{p}|{q}|{n}" for p, q, n, _ in changed_objects]
+    for b in set(present.values()):
+        if not any(k in _TPC_QUERIES.get(b, {}) for k in keys):
+            return chosen, " | tpc: kept (no query's preparation reaches the change: unexplained)"
     tree = Path("/tmp/br") / (commit + "-tpc")
     dropped = []
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -308,6 +383,38 @@ def run_cheap_heavy(commit: str, changes, chosen: list[int], tests: list[dict], 
     return chosen, ""
 
 
+def cands_ids_for_warm(ids, tests: list[dict]) -> list[str]:
+    from br.policy import HEAVY_SECONDS
+
+    return [t["id"] for t in tests if t["id"] in ids and t["seconds"] < HEAVY_SECONDS]
+
+
+def warm_eligible(changes, changed_objects: list[tuple], test_ids: list[str], maps) -> tuple[bool, str]:
+    """Whether swapping patched function bodies into a warm process gives exactly the
+    patched behaviour: only edits inside existing Python files, only function bodies that
+    are not nested in other functions and never run at import, and no candidate that
+    starts child processes (they import sqlglot afresh from disk)."""
+    global _IMPORT_TIME
+    for ch in changes:
+        if ch.old_path is None or ch.new_path != ch.old_path or not ch.old_path.endswith(".py"):
+            return False, "not an edit inside an existing Python file"
+        if not ch.old_path.startswith(("sqlglot/", "tests/")):
+            return False, "file outside sqlglot/ and tests/"
+    if not changed_objects:
+        return False, "no changed code"
+    if _IMPORT_TIME is None:
+        _IMPORT_TIME = {tuple(x) for x in json.loads((APP / "maps" / "import_time.json").read_text())}
+    for p, q, n, kind in changed_objects:
+        if kind != "function" or "<locals>" in q:
+            return False, f"{q} is not a top-level function body"
+        if (p, q, n) in _IMPORT_TIME:
+            return False, f"{q} runs at import"
+    for test_id in test_ids:
+        if maps.tests.get(test_id, {}).get("children", 1):
+            return False, f"{test_id} starts child processes"
+    return True, ""
+
+
 def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> tuple[list[int], str, list[int]]:
     """Test numbers to list for one patch, a one-line reason for the log, and the tests a
     wider (function- or importer-level) selection would have added, for free fill."""
@@ -343,8 +450,12 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
         if unexplained:
             can_verify = False
             reasons.append(f"no clearing: {len(unexplained)} touched lines no test ran alone, e.g. {unexplained[0]}")
+    warm_ok, warm_why = warm_eligible(changes, changed_objects, cands_ids_for_warm(ids, tests), maps)
+    if not warm_ok:
+        reasons.append(f"no warm run: {warm_why}")
     data_only = all(not (ch.old_path or ch.new_path or "").endswith(".py") for ch in changes)
-    chosen, how = decide(cands, lambda regular: verifier(commit, changes, regular), can_verify, data_only)
+    chosen, how = decide(cands, lambda regular: verifier.warm_run(commit, changes, regular),
+                         can_verify and warm_ok, data_only)
     by_id = {t["id"]: t for t in tests}
     chosen, how_run = run_cheap_heavy(commit, changes, chosen, tests, verifier, can_verify and not data_only)
     how += how_run
@@ -352,64 +463,6 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     how += how_tpc
     extras = sorted((by_id[i] for i in wide if i in by_id), key=lambda t: (t["seconds"], t["number"]))
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]
-
-
-# DIAGNOSTIC BUILD 2, not an entry. Answers are a1541d3's, except that each commit whose
-# core answer lists test_execute_tpcds gets a marker for the reason the TPC check kept it,
-# in amounts that decode in base 5 (at most four such commits on practice).
-TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
-REASON_MS = (("tpc: kept (patch shape)", 1, "SHAPE"),
-             ("tpc: kept (class or module code changed)", 5, "CLASSMOD"),
-             ("tpc: kept (changed code runs during execution)", 25, "EXEC"),
-             ("tpc: kept (changed code runs at import)", 125, "IMPORT"),
-             ("tpc: kept (changed code entered by nearly every test)", 125, "IMPORT"),
-             ("tpc: kept (prepared queries differ)", 625, "DIFFER"))
-
-
-def _cost(workers, durations) -> int:
-    occupied = [w for w in workers if w]
-    return (max(sum(durations[n] for n in w) for w in occupied) + WORKER_COST_MS * len(occupied)) if occupied else 0
-
-
-def _subset_sum(durations, unused, target):
-    """Unused tests whose durations add up exactly to `target` ms (smallest tests first)."""
-    reach = {0: []}
-    for n in sorted(unused, key=lambda n: (durations[n], n)):
-        d = durations[n]
-        if d == 0 or d > target:
-            continue
-        for total, picked in list(reach.items()):
-            t = total + d
-            if t <= target and t not in reach:
-                reach[t] = picked + [n]
-        if target in reach:
-            return reach[target]
-    return reach.get(target)
-
-
-def diagnostic_reason_marker(commit, workers, durations, why, tests):
-    listed = {n for w in workers for n in w}
-    number = {t["id"]: t["number"] for t in tests}
-    if number.get(TPCDS_ID) not in listed:
-        return workers
-    hit = next(((ms, tag) for text, ms, tag in REASON_MS if text in why), None)
-    if hit is None:
-        log(f"{commit}: DIAGNOSTIC tpcds listed, no marker (reason: {why[:160]})")
-        return workers
-    ms, tag = hit
-    pick = _subset_sum(durations, [n for n in durations if n not in listed], ms)
-    if not pick:
-        log(f"{commit}: DIAGNOSTIC unmarked {tag} (no spare tests adding to {ms} ms)")
-        return workers
-    base = _cost(workers, durations)
-    new = [list(w) for w in workers]
-    loads = [sum(durations[n] for n in w) if w else -1 for w in new]
-    new[loads.index(max(loads))].extend(pick)
-    if _cost(new, durations) - base != ms:
-        log(f"{commit}: DIAGNOSTIC unmarked {tag} (not exact)")
-        return workers
-    log(f"{commit}: DIAGNOSTIC marker {tag}")
-    return new
 
 
 def main() -> int:
@@ -443,11 +496,6 @@ def main() -> int:
             try:
                 chosen, why, extras = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)
-                # DIAGNOSTIC 2: mark why the TPC check kept test_execute_tpcds (before free fill,
-                # which never raises the cost, so the marker's addition stays exact)
-                pre = diagnostic_reason_marker(commit, workers, durations, why, tests)
-                if valid_line(commit, pre, known):
-                    workers = pre
                 zero = [n for n in sorted(durations) if durations[n] == 0]
                 workers = free_fill(workers, extras + zero, durations)
                 log(f"{commit}: {len(chosen)} tests | {why}")
@@ -460,17 +508,6 @@ def main() -> int:
         lines.append(json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")))
     sys.stdout.write("".join(line + "\n" for line in lines))
     sys.stdout.flush()
-    # DIAGNOSTIC 2 calibration: exactly one full TPC-DS preparation pass on the pinned tree,
-    # in a child as the check does, so the batch's CPU above S4''s shows the scorer's cost.
-    try:
-        import pytest  # noqa: F401 - as the selector does before forking
-        from br.tpc import _run
-
-        before = time.monotonic()
-        rows = _run(str(PINNED), "tpc-ds", 120)
-        log(f"DIAGNOSTIC calibration pass: {'ok' if rows else 'failed'}, {time.monotonic() - before:.1f}s wall")
-    except Exception as error:
-        log(f"DIAGNOSTIC calibration pass error {error!r}")
     log(f"answered {len(commits)} commits")
     return 0
 
