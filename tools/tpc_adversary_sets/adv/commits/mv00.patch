@@ -1,0 +1,29 @@
+diff --git a/sqlglot/jsonpath.py b/sqlglot/jsonpath.py
+--- a/sqlglot/jsonpath.py
++++ b/sqlglot/jsonpath.py
+@@ -219,24 +219,7 @@
+     return exp.JSONPath(expressions=expressions)
+ 
+ 
+-JSON_PATH_PART_TRANSFORMS: dict[type[exp.Expr], t.Callable[..., str]] = {
+-    exp.JSONPathFilter: lambda _, e: f"?{e.this}",
+-    exp.JSONPathKey: lambda self, e: self._jsonpathkey_sql(e),
+-    exp.JSONPathRecursive: lambda _, e: f"..{e.this or ''}",
+-    exp.JSONPathRoot: lambda *_: "$",
+-    exp.JSONPathScript: lambda _, e: f"({e.this}",
+-    exp.JSONPathSelector: lambda self, e: f"[{self.json_path_part(e.this)}]",
+-    exp.JSONPathSlice: lambda self, e: ":".join(
+-        "" if p is False else self.json_path_part(p)
+-        for p in [e.args.get("start"), e.args.get("end"), e.args.get("step")]
+-        if p is not None
+-    ),
+-    exp.JSONPathSubscript: lambda self, e: self._jsonpathsubscript_sql(e),
+-    exp.JSONPathUnion: lambda self, e: (
+-        f"[{','.join(self.json_path_part(p) for p in e.expressions)}]"
+-    ),
+-    exp.JSONPathWildcard: lambda *_: "*",
+-}
++JSON_PATH_PART_TRANSFORMS: dict[type[exp.Expr], t.Callable[..., str]] = {exp.JSONPathKey: lambda self, e: self._jsonpathkey_sql(e), exp.JSONPathRecursive: lambda _, e: f"..{e.this or ''}", exp.JSONPathRoot: lambda *_: '$', exp.JSONPathScript: lambda _, e: f'({e.this}', exp.JSONPathSelector: lambda self, e: f'[{self.json_path_part(e.this)}]', exp.JSONPathSlice: lambda self, e: ':'.join(('' if p is False else self.json_path_part(p) for p in [e.args.get('start'), e.args.get('end'), e.args.get('step')] if p is not None)), exp.JSONPathSubscript: lambda self, e: self._jsonpathsubscript_sql(e), exp.JSONPathUnion: lambda self, e: f"[{','.join((self.json_path_part(p) for p in e.expressions))}]", exp.JSONPathWildcard: lambda *_: '*'}
+ 
+ ALL_JSON_PATH_PARTS = set(JSON_PATH_PART_TRANSFORMS)
+ 

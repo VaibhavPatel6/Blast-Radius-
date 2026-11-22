@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -650,7 +650,7 @@
+     Reference: https://docs.snowflake.com/en/sql-reference/sql/select#usage-notes
+     """
+ 
+-    SUPPORTS_ORDER_BY_ALL = False
++    SUPPORTS_ORDER_BY_ALL = True
+     """
+     Whether ORDER BY ALL is supported (expands to all the selected columns) as in DuckDB, Spark3/Databricks
+     """

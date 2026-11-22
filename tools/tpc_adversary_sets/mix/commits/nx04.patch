@@ -1,0 +1,19 @@
+diff --git a/sqlglot/optimizer/optimizer.py b/sqlglot/optimizer/optimizer.py
+--- a/sqlglot/optimizer/optimizer.py
++++ b/sqlglot/optimizer/optimizer.py
+@@ -101,7 +101,7 @@
+         "dialect": dialect,
+         "sql": sql,
+         "isolate_tables": True,  # needed for other optimizations to perform well
+-        "quote_identifiers": False,
++        "quote_identifiers": True,
+         **kwargs,
+     }
+ 
+diff --git a/tests/fixtures/optimizer/tpc-ds/README.md b/tests/fixtures/optimizer/tpc-ds/README.md
+new file mode 100644
+--- /dev/null
++++ b/tests/fixtures/optimizer/tpc-ds/README.md
+@@ -0,0 +1,2 @@
++notes
++

@@ -1,0 +1,15 @@
+{
+ "nx00": "passing code + tpc-ds expected output",
+ "nx01": "failing code + tpc-ds expected output",
+ "nx02": "passing code + tpc-ds query changed",
+ "nx03": "file added in the tpc-ds fixture directory, alone",
+ "nx04": "passing code + file added in the tpc-ds directory",
+ "nx05": "tpc-ds.sql deleted",
+ "nx06": "passing code + fixture never read by TPC edited",
+ "nx07": "passing code + tpc-h expected output",
+ "nx08": "passing code + fixture never read by TPC deleted",
+ "nx09": "passing code + file added directly under tests/",
+ "nx10": "passing class edit + tpc-ds expected output",
+ "nx11": "failing class edit (tpcds) + tpc-ds expected output",
+ "nx12": "both expected outputs only"
+}

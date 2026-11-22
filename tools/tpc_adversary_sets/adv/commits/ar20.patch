@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/core.py b/sqlglot/expressions/core.py
+--- a/sqlglot/expressions/core.py
++++ b/sqlglot/expressions/core.py
+@@ -1826,7 +1826,7 @@
+         "temporary": False,
+     }
+     is_primitive = True
+-    _hash_raw_args = True
++    _hash_raw_args = False
+ 
+     @property
+     def quoted(self) -> bool:

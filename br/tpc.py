@@ -76,6 +76,10 @@ _LOCK_TYPES = (type(__import__("threading").RLock()), type(__import__("threading
 # pinned tree (no test can depend on it): compared as sets.
 _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 
+# Refuse function edits that could change state shared with the tests that run before
+# the TPC tests in the suite (`mutation_refusal`).
+MUTATION_RULE = True
+
 # Class-body and module-level edits are judged too (attribute by attribute, against the
 # execution-read record maps/tpc_reads.json). False refuses them as before.
 CLASS_LEVEL = True
@@ -96,11 +100,26 @@ def _stage_map():
     return _MAPS["tpc_stages.json"]
 
 
+def _execution_record():
+    """maps/tpc_execution.json (tools/covmap/tpc_execution.py): code run and class
+    attributes read during the execution parts along the real worker path
+    (test_executor.mp_execute -> sqlglot.executor.execute), or None."""
+    if "tpc_execution.json" not in _MAPS:
+        try:
+            _MAPS["tpc_execution.json"] = json.loads((_APP / "maps" / "tpc_execution.json").read_text())
+        except (OSError, ValueError):
+            _MAPS["tpc_execution.json"] = None
+    return _MAPS["tpc_execution.json"]
+
+
 def _map(name: str):
     if name not in _MAPS:
         data = json.loads((_APP / "maps" / name).read_text())
         if name == "tpc_exec.json":
             data = {(f[len("/src/"):], q, n) for f, q, n in data}
+            record = _execution_record()
+            if record is not None:  # the real worker path also runs execute()'s own code
+                data |= {tuple(c) for c in record["code"]}
         elif name == "import_time.json":
             data = {tuple(x) for x in data}
         _MAPS[name] = data
@@ -147,6 +166,78 @@ def code_renames(changes) -> dict[str, str] | None:
         if old is None or new is None or not walk(old, new):
             return None
     return renames
+
+
+_STORES = {"STORE_GLOBAL", "DELETE_GLOBAL", "STORE_ATTR", "DELETE_ATTR", "STORE_SUBSCR", "DELETE_SUBSCR",
+           "STORE_SLICE", "DELETE_SLICE"}
+_COPY_WORDS = {"copy", "inplace", "deep", "mutate"}
+
+
+def _effects(code: types.CodeType):
+    """What a code object's own instructions could do to shared state: the names it uses
+    (attribute and global names: get versus pop, copy, dict, update), its store and delete
+    instructions, its in-place operators, and its constants when a call passes a keyword
+    such as copy= (copy=True -> False makes an unchanged callee change its argument)."""
+    import collections
+    import dis
+
+    stores, inplace = collections.Counter(), collections.Counter()
+    copy_keywords = False
+    for ins in dis.get_instructions(code):
+        if ins.opname in _STORES:
+            stores[(ins.opname, ins.argrepr)] += 1
+        elif ins.opname == "BINARY_OP" and ins.argrepr.endswith("=") and ins.argrepr != "==":
+            inplace[ins.argrepr] += 1
+        elif ins.opname == "LOAD_CONST" and isinstance(ins.argval, tuple) \
+                and all(isinstance(x, str) for x in ins.argval) and _COPY_WORDS & set(ins.argval):
+            copy_keywords = True
+    consts = [c for c in code.co_consts if not isinstance(c, types.CodeType)] if copy_keywords else None
+    return collections.Counter(code.co_names), stores, inplace, consts
+
+
+def mutation_refusal(changes) -> str | None:
+    """Why a function edit could change state shared with other tests, judged from the
+    bytecode of every changed function against its pinned version, or None.
+
+    The TPC check compares cold processes; in the suite, test_execute_tpcds runs after
+    about a thousand other tests, and a patched function that writes shared state for
+    their inputs (a dialect the TPC queries never use) leaves it changed for the TPC test.
+    So a changed function (not a class or module body, whose effect is the import state)
+    is refused when, compared with the pinned code, it uses a different set of names, has
+    a store, delete or in-place operation the pinned code does not have, changes a
+    constant while passing a copy-like keyword, or gains or loses a nested function."""
+    from br import analyze
+
+    for ch in changes:
+        if ch.old_path is None or ch.new_path != ch.old_path or not ch.old_path.endswith(".py"):
+            continue
+        try:
+            old, new = analyze._compile(ch.old_text, ch.old_path), analyze._compile(ch.new_text, ch.new_path)
+        except Exception:  # noqa: BLE001
+            return f"{ch.old_path} does not compile"
+        if old is None or new is None:
+            return f"{ch.old_path} does not compile"
+        todo = [(old, new)]
+        while todo:
+            o, n = todo.pop()
+            old_kids, new_kids = analyze._keyed_children(o), analyze._keyed_children(n)
+            if set(old_kids) != set(new_kids):
+                return f"{n.co_qualname} gains or loses a nested function"
+            todo.extend((old_kids[k], new_kids[k]) for k in old_kids)
+            if not o.co_flags & 0x1:  # CO_OPTIMIZED: a function; module and class bodies are not
+                continue
+            if _effects(o) == _effects(n):
+                continue
+            (old_names, old_stores, old_inplace, old_consts) = _effects(o)
+            (new_names, new_stores, new_inplace, new_consts) = _effects(n)
+            if old_names != new_names:
+                diff = sorted((set(new_names) ^ set(old_names)) or {"counts"})
+                return f"{n.co_qualname} uses different names ({', '.join(diff[:3])})"
+            if old_stores != new_stores or old_inplace != new_inplace:
+                return f"{n.co_qualname} stores, deletes or updates in place differently"
+            if old_consts != new_consts:
+                return f"{n.co_qualname} changes a constant next to a copy-like keyword"
+    return None
 
 
 def _state(renames: dict[str, str]) -> dict:
@@ -554,8 +645,15 @@ def _reads():
     if "tpc_reads.json" not in _MAPS:
         try:
             data = json.loads((_APP / "maps" / "tpc_reads.json").read_text())
-            _MAPS["tpc_reads.json"] = ({tuple(x) for x in data["instrumented"]},
-                                       {tuple(x) for x in data["execution_reads"]})
+            instrumented = {tuple(x) for x in data["instrumented"]}
+            read = {tuple(x) for x in data["execution_reads"]}
+            record = _execution_record()
+            if record is None or record.get("bypass"):
+                raise ValueError("no real-path record, or executed code that can bypass it")
+            # attributes both recorders instrumented; reads seen by either
+            instrumented &= {tuple(x) for x in record["instrumented"]}
+            read |= {tuple(x) for x in record["execution_reads"]}
+            _MAPS["tpc_reads.json"] = (instrumented, read)
         except (OSError, ValueError, KeyError):
             _MAPS["tpc_reads.json"] = None
     return _MAPS["tpc_reads.json"]
@@ -740,16 +838,67 @@ def decide_fixture(changes, chosen: list[int], tests: list[dict], pinned_tree: s
     return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] (fixture: only expected outputs or comments changed)"
 
 
+def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | None]:
+    """Split a patch into the changes the TPC executor tests can see and those they cannot:
+    (relevant changes, notes on what was set aside, why to keep the tests or None).
+
+    Set aside: an edit of a TPC query fixture that keeps every pair's settings and query
+    (the tests ignore the expected output); an in-place edit of a non-Python file the
+    TPC tests never open (maps: opened); a non-Python file added or removed in a directory
+    they never list (maps: listed). A query fixture that changes settings or queries or
+    does not load, a non-Python file they open, an added or removed file where they list,
+    or a mode change keeps the tests. Python files are never set aside."""
+    relevant, notes = [], []
+    tpc_ids = set(TPC_TESTS)
+    for ch in changes:
+        path = ch.new_path or ch.old_path or ""
+        if path.endswith(".py") or (ch.old_path or "").endswith(".py"):
+            relevant.append(ch)
+            continue
+        if getattr(ch, "mode_change", False):
+            return changes, notes, f"mode change of {path}"
+        if ch.old_path in FIXTURES and ch.new_path == ch.old_path and ch.old_text is not None \
+                and ch.new_text is not None:
+            relative = ch.old_path[len("tests/fixtures/"):]
+            old = _fixture_pairs(pinned_tree, relative, ch.old_text)
+            new = _fixture_pairs(pinned_tree, relative, ch.new_text)
+            if old is None or new is None:
+                return changes, notes, f"fixture {ch.old_path} does not load"
+            if [p[:2] for p in old] != [p[:2] for p in new]:
+                return changes, notes, f"fixture {ch.old_path}: settings or queries changed"
+            notes.append(f"{ch.old_path}: expected outputs or comments only")
+            continue
+        if maps is None:
+            return changes, notes, f"{path}: no maps to judge a non-Python file"
+        if ch.old_path is not None and ch.new_path == ch.old_path:
+            if maps.opened(ch.old_path) & tpc_ids:
+                return changes, notes, f"{path} is read by the TPC tests"
+            notes.append(f"{path}: never opened by the TPC tests")
+            continue
+        for p in (ch.old_path, ch.new_path):
+            if p is None:
+                continue
+            if maps.opened(p) & tpc_ids:
+                return changes, notes, f"{p} is read by the TPC tests"
+            directory = p.rsplit("/", 1)[0] if "/" in p else ""
+            if maps.listed(directory) & tpc_ids:
+                return changes, notes, f"{p} added or removed where the TPC tests list files"
+        notes.append(f"{path}: added or removed where the TPC tests never look")
+    return relevant, notes, None
+
+
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, pinned_tree: str, timeout: float, log=lambda message: None,
-           work_root: str = "/tmp/br", saving_ms=None) -> tuple[list[int], str]:
+           work_root: str = "/tmp/br", saving_ms=None, maps=None) -> tuple[list[int], str]:
     """The whole TPC decision for one patch: (tests still listed, a note for the log).
 
     `chosen` are the test numbers the selector would list; `tests` is tests.json's list;
     `changed_objects` and `class_edits` come from br.analyze.candidates. `saving_ms`, when
     given, maps a list of test numbers to the answer-cost saving (ms) of leaving them out;
-    the check then runs only when its expected saving beats its expected CPU. Drops a TPC
-    test only on the evidence described in this module's docstring; any doubt keeps it."""
+    the check then runs only when its expected saving beats its expected CPU. `maps`
+    (br.maps.Maps), when given, lets non-Python changes the TPC tests never see be set
+    aside (`set_aside`). Drops a TPC test only on the evidence described in this module's
+    docstring; any doubt keeps it."""
     from br.verify import build_tree, remove_tree
 
     by_number = {t["number"]: t for t in tests}
@@ -757,8 +906,17 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     if not present:
         return chosen, ""
     fixture = decide_fixture(changes, chosen, tests, pinned_tree)
-    if fixture is not None:
+    if fixture is not None and maps is None:
         return fixture
+    all_changes = changes
+    changes, aside, why_keep = set_aside(changes, pinned_tree, maps)
+    if why_keep:
+        return chosen, f" | tpc: kept ({why_keep})"
+    if not changes:
+        if any("expected outputs" in n for n in aside):
+            names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in present)
+            return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] ({'; '.join(aside)[:200]})"
+        return chosen, f" | tpc: kept (nothing explains the candidate: {'; '.join(aside)[:150]})"
     paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
     if (not changed_objects and not class_edits) or any(
             not p.endswith(".py") or not p.startswith("sqlglot/") or p.startswith(REFUSE_PREFIXES) for p in paths):
@@ -790,7 +948,7 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
             worker = frozenset(i for k in keys for i in stages[b]["worker"].get(k, []))
             reached[b] = affected[b] | main | worker
             affected[b] = worker
-    notes = []
+    notes = [f"set aside {len(aside)} non-code change(s)"] if aside else []
     for n, b in sorted(present.items()):
         if not reached[b] and not at_import:
             # the test is a candidate, yet no map says where it runs the change
@@ -807,6 +965,9 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
         if not worth:
             return chosen, f" | tpc: kept (not worth it: {estimate_note})"
         present = worth
+    why_shared = mutation_refusal(changes) if MUTATION_RULE else None
+    if why_shared:
+        return chosen, f" | tpc: kept (could change state other tests share: {why_shared})"
     renames = code_renames(changes)
     if renames is None:
         return chosen, " | tpc: kept (changed code cannot be paired)"
@@ -815,7 +976,7 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
         remove_tree(tree)
-        build_tree(tree, changes)
+        build_tree(tree, all_changes)  # the patched tree as it is, set-aside files included
         for n, benchmark in sorted(present.items()):
             same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], renames, at_import,
                                 allow_unread=class_level)

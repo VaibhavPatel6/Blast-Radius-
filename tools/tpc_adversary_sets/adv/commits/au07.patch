@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -644,7 +644,7 @@
+     ARRAY_SIZE_DIM_REQUIRED: bool | None = None
+ 
+     # Whether a multi-argument DECODE(...) function is supported. If not, a CASE expression is generated
+-    SUPPORTS_DECODE_CASE = True
++    SUPPORTS_DECODE_CASE = False
+ 
+     # Whether CHR / CHAR accepts multiple code points, e.g. CHAR(72, 105). If not, the calls are concatenated
+     SUPPORTS_MULTI_ARG_CHR = True

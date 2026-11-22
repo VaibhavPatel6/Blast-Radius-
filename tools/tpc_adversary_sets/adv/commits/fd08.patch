@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -2773,7 +2773,7 @@
+     def least_sql(self, expression: exp.Least) -> str:
+         return self._greatest_least_sql(expression)
+ 
+-    def lambda_sql(self, expression: exp.Lambda, arrow_sep: str = "->", wrap: bool = True) -> str:
++    def lambda_sql(self, expression: exp.Lambda, arrow_sep: str = '-y', wrap: bool = True) -> str:
+         if self.dialect.version >= (1, 3):
+             prefix = "LAMBDA "
+             arrow_sep = ":"

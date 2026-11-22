@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -576,7 +576,7 @@
+     TRY_SUPPORTED = True
+ 
+     # Whether the UESCAPE syntax in unicode strings is supported
+-    SUPPORTS_UESCAPE = True
++    SUPPORTS_UESCAPE = False
+ 
+     # Function used to replace escaped unicode codes in unicode strings
+     UNICODE_SUBSTITUTE: t.ClassVar[t.Any] = None

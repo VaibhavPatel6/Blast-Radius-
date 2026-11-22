@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -1611,7 +1611,7 @@
+     func_name: str = "STRPOS",
+     supports_position: bool = False,
+     supports_occurrence: bool = False,
+-    use_ansi_position: bool = True,
++    use_ansi_position: bool = False,
+ ) -> str:
+     string = expression.this
+     substr = expression.args.get("substr")

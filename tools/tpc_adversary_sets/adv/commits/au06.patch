@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/functions.py b/sqlglot/expressions/functions.py
+--- a/sqlglot/expressions/functions.py
++++ b/sqlglot/expressions/functions.py
+@@ -32,7 +32,7 @@
+ 
+ 
+ class Cast(Expression, Func):
+-    is_cast: t.ClassVar[bool] = True
++    is_cast: t.ClassVar[bool] = False
+     arg_types = {
+         "this": True,
+         "to": True,

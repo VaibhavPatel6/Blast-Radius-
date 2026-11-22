@@ -1,0 +1,23 @@
+diff --git a/sqlglot/optimizer/scope.py b/sqlglot/optimizer/scope.py
+--- a/sqlglot/optimizer/scope.py
++++ b/sqlglot/optimizer/scope.py
+@@ -23,18 +23,7 @@
+ 
+ # The node types `Scope._collect` classifies, roughly ordered by frequency. `exp.Query`
+ # covers subqueries, and `exp.UDTF` covers laterals.
+-COLLECTIBLE_TYPES = (
+-    exp.Column,
+-    exp.Dot,
+-    exp.Table,
+-    exp.Query,
+-    exp.UDTF,
+-    exp.CTE,
+-    exp.Star,
+-    exp.TableColumn,
+-    exp.JoinHint,
+-    exp.Comprehension,
+-)
++COLLECTIBLE_TYPES = (exp.Dot, exp.Table, exp.Query, exp.UDTF, exp.CTE, exp.Star, exp.TableColumn, exp.JoinHint, exp.Comprehension)
+ 
+ 
+ class ScopeType(Enum):

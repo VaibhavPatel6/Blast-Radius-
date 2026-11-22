@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -16,7 +16,7 @@
+ FROM   customer_total_return ctr1,
+        store,
+        customer
+-WHERE  ctr1.ctr_total_return > (SELECT Avg(ctr_total_return) * 1.2
++WHERE  ctr1.ctr_total_return > (SELECT Avg(ctr_total_return) * 1.3
+                                 FROM   customer_total_return ctr2
+                                 WHERE  ctr1.ctr_store_sk = ctr2.ctr_store_sk)
+        AND s_store_sk = ctr1.ctr_store_sk

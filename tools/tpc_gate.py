@@ -171,12 +171,19 @@ def main() -> int:
                         rest = [n for n in everything if n not in drop]
                         return answer_cost(everything, durations) - answer_cost(rest, durations)
                 kept, how = tpc.decide(commit, changes, chosen, tests, changed_objects, class_edits,
-                                       str(PINNED), 120, saving_ms=saving_ms)
+                                       str(PINNED), 120, saving_ms=saving_ms, maps=maps)
             dropped = set(chosen) - set(kept)
             missed = dropped & failing
             drops += len(dropped)
             misses += len(missed)
             fails = sorted(failing & set(chosen))
+            paths = sorted({p for ch in changes for p in (ch.old_path, ch.new_path) if p})
+            kinds = sorted({k for *_, k in changed_objects} | ({"class-edit"} if class_edits else set()))
+            if all(p.startswith("tests/fixtures/") for p in paths):
+                kinds = ["fixture"]
+            elif not kinds:
+                kinds = ["no code"]
+            print(f"{set_dir.name}/{commit}: kind {'+'.join(kinds)} paths {','.join(paths)[:80]}", flush=True)
             print(f"{set_dir.name}/{commit}: cand {chosen} failing {fails} dropped {sorted(dropped)} "
                   f"{'MISSED ' + str(sorted(missed)) if missed else 'ok'} cpu {cpu() - t0:.2f}s "
                   f"wall {time.monotonic() - w0:.1f}s {how.strip()[:160]}", flush=True)

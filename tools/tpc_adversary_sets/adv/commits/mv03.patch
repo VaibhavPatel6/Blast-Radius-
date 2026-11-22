@@ -1,0 +1,19 @@
+diff --git a/sqlglot/typing/duckdb.py b/sqlglot/typing/duckdb.py
+--- a/sqlglot/typing/duckdb.py
++++ b/sqlglot/typing/duckdb.py
+@@ -9,14 +9,7 @@
+     from sqlglot.optimizer.annotate_types import TypeAnnotator
+ 
+ 
+-DATETIME_WITHOUT_TZ = {
+-    exp.DType.DATE,
+-    exp.DType.TIMESTAMP,
+-    exp.DType.TIMESTAMPNTZ,
+-    exp.DType.TIMESTAMP_S,
+-    exp.DType.TIMESTAMP_MS,
+-    exp.DType.TIMESTAMP_NS,
+-}
++DATETIME_WITHOUT_TZ = {exp.DType.TIMESTAMP, exp.DType.TIMESTAMPNTZ, exp.DType.TIMESTAMP_S, exp.DType.TIMESTAMP_MS, exp.DType.TIMESTAMP_NS}
+ 
+ 
+ def _annotate_at_time_zone(self: TypeAnnotator, expression: exp.AtTimeZone) -> exp.Expr:

@@ -1,0 +1,16 @@
+diff --git a/sqlglot/parsers/snowflake.py b/sqlglot/parsers/snowflake.py
+--- a/sqlglot/parsers/snowflake.py
++++ b/sqlglot/parsers/snowflake.py
+@@ -1470,11 +1470,7 @@
+ 
+ 
+ # This is imported and used by both the parser (above) and the generator in the dialect file
+-RANKING_WINDOW_FUNCTIONS_WITH_FRAME = (
+-    exp.FirstValue,
+-    exp.LastValue,
+-    exp.NthValue,
+-)
++RANKING_WINDOW_FUNCTIONS_WITH_FRAME = (exp.LastValue, exp.NthValue)
+ 
+ 
+ def build_object_construct(args: list) -> exp.StarMap | exp.Struct:

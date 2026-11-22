@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -577,7 +577,7 @@
+         ) SELECT c FROM y;
+     """
+ 
+-    COPY_PARAMS_ARE_CSV = True
++    COPY_PARAMS_ARE_CSV = False
+     """
+     Whether COPY statement parameters are separated by comma or whitespace
+     """
