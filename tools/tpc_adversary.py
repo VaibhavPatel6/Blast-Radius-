@@ -3,6 +3,7 @@
 pytest and gating with tools/tpc_gate.py:
 
     python3 tools/tpc_adversary.py PINNED_TREE maps/tpc_execution.json OUT_DIR [SEED]
+    python3 tools/tpc_adversary.py --tables PINNED_TREE maps/tpc_execution.json OUT_DIR
 
 Kinds (prefix of the patch name):
   ar  class attribute the pinned TPC tests read during execution (expected: kept)
@@ -176,5 +177,56 @@ def main() -> int:
     return 0
 
 
+
+
+def table_variants(node: ast.AST) -> list[str]:
+    """Several one-entry edits of a table literal: the first, middle or last entry
+    removed, or (dict) the first value replaced by None."""
+    out = []
+    if isinstance(node, ast.Dict) and len(node.keys) >= 2 and None not in node.keys:
+        n = len(node.keys)
+        for i in sorted({0, n // 2, n - 1}):
+            out.append(ast.unparse(ast.Dict(keys=node.keys[:i] + node.keys[i + 1:], values=node.values[:i] + node.values[i + 1:])))
+        out.append(ast.unparse(ast.Dict(keys=node.keys, values=[ast.Constant(None)] + node.values[1:])))
+    elif isinstance(node, (ast.Set, ast.List, ast.Tuple)) and len(node.elts) >= 2 \
+            and not any(isinstance(e, ast.Starred) for e in node.elts):
+        n = len(node.elts)
+        for i in sorted({0, n // 2, n - 1}):
+            out.append(ast.unparse(_like(node, node.elts[:i] + node.elts[i + 1:])))
+    return out
+
+
+def batch_tables(tree: Path, record_path: Path, out: Path) -> None:
+    """Second batch: every table-valued class attribute read during execution, in each
+    variant of `table_variants` (prefix "at")."""
+    record = json.loads(record_path.read_text())
+    read = {tuple(x) for x in record["execution_reads"]}
+    (out / "commits").mkdir(parents=True, exist_ok=True)
+    made = {}
+    n = 0
+    for file in sorted((tree / "sqlglot").rglob("*.py")):
+        path = str(file.relative_to(tree))
+        if path.startswith(SKIP_PREFIXES):
+            continue
+        text = file.read_text()
+        mod = module_name(path)
+        for qual, name, value in class_attributes(ast.parse(text)):
+            if (mod, qual, name) not in read:
+                continue
+            for variant in table_variants(value):
+                pname = f"at{n:03d}"
+                (out / "commits" / f"{pname}.patch").write_text(patch(path, text, replace(text, value, variant)))
+                made[pname] = f"{mod}:{qual}.{name} table edit {variant[:60]}"
+                n += 1
+    (out / "made.json").write_text(json.dumps(made, indent=1))
+    only = {k: ["tests/test_executor.py::TestExecutor::test_execute_tpcds",
+                "tests/test_executor.py::TestExecutor::test_execute_tpch"] for k in made}
+    (out / "only.json").write_text(json.dumps(only))
+    print(f"table batch: {len(made)} patches", file=sys.stderr)
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "--tables":
+        batch_tables(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+        sys.exit(0)
     sys.exit(main())
