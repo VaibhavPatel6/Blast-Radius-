@@ -435,7 +435,12 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
             DIAG4[commit] = ("drop", 0)
         elif True:
             category = diag5_category(commit, how_tpc)
-            DIAG4[commit] = ("keep", DIAG5_CODES[category])
+            code = DIAG5_CODES[category]
+            if category == "other":
+                code = next((c for c, text in DIAG6_REASONS if text in (how_tpc or "")), DIAG6_ELSE)
+                if code == 10:  # an exception: which step raised it, from the repr
+                    log(f"{commit}: DIAGNOSTIC6 error {how_tpc[:300]}")
+            DIAG4[commit] = ("keep", code)
             log(f"{commit}: DIAGNOSTIC5 category {category} diff={DIAG5_DIFF.get(commit)}")
         else:
             paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
@@ -452,7 +457,7 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]
 
 
-# DIAGNOSTIC BUILD 5 (DIAG-4's frame with the markers below), not an entry. Answers exactly as f8e7357 (practice 199.269 s
+# DIAGNOSTIC BUILD 6 (DIAG-4's frame; only DIAG-5's 'other' bucket is marked, codes in DIAG6_REASONS), not an entry. Answers exactly as f8e7357 (practice 199.269 s
 # simulated) while running every S6 decider (so its CPU shows S6's cost), plus:
 #  - for each commit whose f8e7357 answer lists test_execute_tpcds, a marker in ms:
 #    S6 drops it: 1, and the test is really left out, with other unused tests added so
@@ -554,8 +559,26 @@ def diagnostic4(commit, chosen, workers, durations):
 # patch shape or the fixture rule, which reason. Codes (ms) chosen so that any 4 of them
 # (0 repeated allowed) have distinct sums. Drops and shape/fixture keeps are 0 (DIAG-4
 # counts them).
-DIAG5_CODES = {"rest": 0, "differ_1_3": 1, "differ_4plus": 5, "exec_map": 21, "not_worth": 55,
-               "import_state": 153, "not_run": 368, "shared_state": 856, "other": 1424}
+DIAG5_CODES = {"rest": 0, "differ_1_3": 0, "differ_4plus": 0, "exec_map": 0, "not_worth": 0,
+               "import_state": 0, "not_run": 0, "shared_state": 0, "other": 0}
+# DIAGNOSTIC 6: DIAG-5's "other" bucket (one practice commit) split by the check's own words.
+DIAG6_REASONS = [  # (code ms, text found in the TPC note)
+    (1, "is read by the TPC tests"),
+    (2, "added or removed where the TPC tests list files"),
+    (3, "nothing explains the candidate"),
+    (4, "no map explains it"),
+    (5, "file added, removed or renamed"),
+    (6, "changed code cannot be paired"),
+    (7, "class or module code changed"),
+    (8, "mode change"),
+    (9, "no maps to judge a non-Python file"),
+    (10, "kept (error"),
+    (11, "patched side failed or timed out"),
+    (12, "pinned side failed"),
+    (13, "fewer rows"),
+    (14, " differs at query "),
+]
+DIAG6_ELSE = 15
 DIAG5_DIFF: dict = {}
 DIAG5_CURRENT = {"commit": None}
 
