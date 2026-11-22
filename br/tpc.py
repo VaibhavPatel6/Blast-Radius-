@@ -39,6 +39,16 @@ patched tree in two processes forked from the selector:
 If 1 and 2 are equal the workers receive identical inputs, read identical state and run
 unchanged code, so the test behaves as on the pinned commit, where it passes.
 
+The comparison runs in cold processes, while in the suite test_execute_tpcds runs after
+about a thousand other tests. A changed function that writes state those tests share,
+for inputs the TPC queries never give, would leave that state changed for the TPC test,
+and no cold comparison can see it. `mutation_refusal` therefore refuses every function
+edit whose changed code writes at all, or whose names, writes or copy-like keyword
+values differ from the pinned code. Not covered, and accepted (planning session,
+2026-11-22): an edit that writes nothing itself but hands an unchanged function a
+different object, which that unchanged function then mutates, for inputs the TPC
+queries never give.
+
 The pinned side is computed once per run per benchmark, after pytest is imported (sqlglot
 checks for a test framework at import). It cannot be made at image build: the parse of
 TPC-DS query 48 depends on what earlier parses left in the process and on memory-address
@@ -171,6 +181,12 @@ def code_renames(changes) -> dict[str, str] | None:
 _STORES = {"STORE_GLOBAL", "DELETE_GLOBAL", "STORE_ATTR", "DELETE_ATTR", "STORE_SUBSCR", "DELETE_SUBSCR",
            "STORE_SLICE", "DELETE_SLICE"}
 _COPY_WORDS = {"copy", "inplace", "deep", "mutate"}
+# The strict part of the shared-state rule: a changed function (pinned or patched) that
+# writes anywhere, or calls a method that changes its receiver, is refused, so that a
+# flipped condition in front of an existing write cannot get through.
+_STRICT_STORES = {"STORE_ATTR", "STORE_SUBSCR", "DELETE_ATTR", "DELETE_SUBSCR", "STORE_GLOBAL", "DELETE_GLOBAL"}
+_MUTATING_METHODS = {"pop", "popitem", "append", "extend", "insert", "remove", "clear", "update", "setdefault",
+                     "add", "discard", "sort", "reverse"}
 
 
 def _effects(code: types.CodeType):
@@ -225,10 +241,15 @@ def mutation_refusal(changes) -> str | None:
     about a thousand other tests, and a patched function that writes shared state for
     their inputs (a dialect the TPC queries never use) leaves it changed for the TPC test.
     So a changed function (not a class or module body, whose effect is the import state)
-    is refused when, compared with the pinned code, it uses a different set of names, has
+    is refused when either version of it stores to or deletes an attribute, item or global,
+    or calls pop, popitem, append, extend, insert, remove, clear, update, setdefault, add,
+    discard, sort or reverse (on 93 patches the gates drop a TPC test for, this strict part
+    keeps 88); or when, compared with the pinned code, it uses a different set of names, has
     a store, delete or in-place operation the pinned code does not have, gives a copy-like
     keyword (copy, inplace, deep, mutate) another value, or gains or loses a nested
     function."""
+    import dis
+
     from br import analyze
 
     for ch in changes:
@@ -249,6 +270,13 @@ def mutation_refusal(changes) -> str | None:
             todo.extend((old_kids[k], new_kids[k]) for k in old_kids)
             if not o.co_flags & 0x1:  # CO_OPTIMIZED: a function; module and class bodies are not
                 continue
+            if analyze._own_signature(o) != analyze._own_signature(n):
+                for code in (o, n):  # strict: any write at all in a changed function, either side
+                    for ins in dis.get_instructions(code):
+                        if ins.opname in _STRICT_STORES:
+                            return f"{code.co_qualname} contains {ins.opname} {ins.argrepr}".rstrip()
+                        if ins.opname == "LOAD_ATTR" and str(ins.argval) in _MUTATING_METHODS:
+                            return f"{code.co_qualname} calls .{ins.argval}()"
             if _effects(o) == _effects(n):
                 continue
             (old_names, old_stores, old_inplace, old_consts) = _effects(o)
