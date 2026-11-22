@@ -88,7 +88,7 @@ _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 
 # Set aside Python files under tests/ that the TPC tests never import or run
 # (`_test_file_refusal`). False keeps every tests/ path refused as before.
-TEST_FILES = True
+TEST_FILES = False
 
 # Refuse function edits that could change state shared with the tests that run before
 # the TPC tests in the suite (`mutation_refusal`).
