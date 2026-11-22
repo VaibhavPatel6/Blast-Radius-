@@ -293,11 +293,57 @@ _TPC_QUERIES: dict | None = None
 IMPORT_LIKE_ENTRANTS = 1500
 
 
+# The TPC check prepares queries in a child that has imported every sqlglot module first,
+# while the real test loads dialects (and optimizer rules) lazily: a change to the code
+# that loads modules can break the real test while both cold sides agree (a registry
+# lookup `not in` -> `in` in _Dialect.get did). Such changes keep the TPC tests.
+LAZY_FILES = {"sqlglot/dialects/__init__.py", "sqlglot/optimizer/__init__.py", "sqlglot/serde.py",
+              "sqlglot/__init__.py"}
+LAZY_NAMES = {"import_module", "__import__", "_try_load", "_classes", "entry_points", "get_or_raise",
+              "find_spec", "reload"}
+
+
+def lazy_loading_refusal(changes) -> str:
+    """Why the TPC tests must stay listed because the patch touches module loading, or ''."""
+    import dis
+
+    from br.analyze import changed_pairs
+
+    for ch in changes:
+        path = ch.new_path or ch.old_path or ""
+        if not path.endswith(".py"):
+            continue
+        if path in LAZY_FILES:
+            return f"{path} loads modules lazily"
+        if ch.old_text is None or ch.new_text is None:
+            continue
+        try:
+            old = compile(ch.old_text.encode(), path, "exec", dont_inherit=True)
+            new = compile(ch.new_text.encode(), path, "exec", dont_inherit=True)
+        except (SyntaxError, ValueError):
+            return f"{path} does not compile"
+        for o, n, _ in changed_pairs(old, new):
+            for code in (o, n):
+                if code is None:
+                    continue
+                qual = code.co_qualname
+                if path == "sqlglot/dialects/dialect.py" and (qual.startswith("_Dialect") or "get_or_raise" in qual):
+                    return f"{qual} loads dialects"
+                if set(code.co_names) & LAZY_NAMES:
+                    return f"{qual} refers to module loading ({sorted(set(code.co_names) & LAZY_NAMES)[0]})"
+                if any(ins.opname in ("IMPORT_NAME", "IMPORT_FROM") for ins in dis.get_instructions(code)):
+                    return f"{qual} imports a module"
+    return ""
+
+
 def decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier, allowed, maps=None):
     """Drop the TPC executor tests when what they depend on provably did not change
     (br/tpc.py: prepared queries, import state, fixtures), when that is expected to pay."""
     if not allowed or not verifier.has_time():
         return chosen, ""
+    why_lazy = lazy_loading_refusal(changes)
+    if why_lazy:
+        return chosen, f" | tpc: kept ({why_lazy})"
     from br.tpc import decide
 
     durations = {t["number"]: duration_ms(t["seconds"]) for t in tests}
