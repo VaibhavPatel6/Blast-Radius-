@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/core.py b/sqlglot/expressions/core.py
+--- a/sqlglot/expressions/core.py
++++ b/sqlglot/expressions/core.py
+@@ -87,7 +87,7 @@
+     required_args: t.ClassVar[set[str]] = {"this"}
+     is_var_len_args: t.ClassVar[bool] = False
+     var_len_arg_key: t.ClassVar[str] = "expressions"
+-    _hash_raw_args: t.ClassVar[bool] = False
++    _hash_raw_args: t.ClassVar[bool] = True
+     is_subquery: t.ClassVar[bool] = False
+     is_cast: t.ClassVar[bool] = False
+     is_data_type: t.ClassVar[bool] = False

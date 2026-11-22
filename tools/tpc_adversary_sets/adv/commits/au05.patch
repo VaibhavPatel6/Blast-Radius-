@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -441,7 +441,7 @@
+     COMPUTED_COLUMN_WITH_TYPE = True
+ 
+     # Whether CREATE TABLE .. COPY .. is supported. False means we'll generate CLONE instead of COPY
+-    SUPPORTS_TABLE_COPY = True
++    SUPPORTS_TABLE_COPY = False
+ 
+     # Whether parentheses are required around the table sample's expression
+     TABLESAMPLE_REQUIRES_PARENS = True

@@ -1,0 +1,21 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -78,16 +78,7 @@
+ 
+ logger = logging.getLogger("sqlglot")
+ 
+-UNESCAPED_SEQUENCES = {
+-    "\\a": "\a",
+-    "\\b": "\b",
+-    "\\f": "\f",
+-    "\\n": "\n",
+-    "\\r": "\r",
+-    "\\t": "\t",
+-    "\\v": "\v",
+-    "\\\\": "\\",
+-}
++UNESCAPED_SEQUENCES = {'\\b': '\x08', '\\f': '\x0c', '\\n': '\n', '\\r': '\r', '\\t': '\t', '\\v': '\x0b', '\\\\': '\\'}
+ 
+ PLUGIN_GROUP_NAME = "sqlglot.dialects"
+ 

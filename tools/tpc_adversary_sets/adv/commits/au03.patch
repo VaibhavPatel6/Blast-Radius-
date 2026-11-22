@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -904,7 +904,7 @@
+ 
+     RESPECT_IGNORE_NULLS_UNSUPPORTED_EXPRESSIONS: t.ClassVar[tuple[type[exp.Expr], ...]] = ()
+ 
+-    MOD_OPERATOR = "%"
++    MOD_OPERATOR = 'y'
+ 
+     # Infix operators that bind at least as tightly as %, so a Mod on their right side needs parentheses
+     MOD_PAREN_PARENT_TYPES: t.ClassVar[tuple[type[exp.Expr], ...]] = (

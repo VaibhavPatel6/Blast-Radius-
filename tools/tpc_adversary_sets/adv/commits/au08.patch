@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -442,7 +442,7 @@
+     UNNEST_COLUMN_ONLY = False
+     """Whether `UNNEST` table aliases are treated as column aliases."""
+ 
+-    ALIAS_POST_TABLESAMPLE = False
++    ALIAS_POST_TABLESAMPLE = True
+     """Whether the table alias comes after tablesample."""
+ 
+     TABLESAMPLE_SIZE_IS_PERCENT = False

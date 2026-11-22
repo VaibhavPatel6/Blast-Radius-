@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -838,7 +838,7 @@
+     REGEXP_EXTRACT_DEFAULT_GROUP = 0
+     """The default value for the capturing group."""
+ 
+-    REGEXP_EXTRACT_POSITION_OVERFLOW_RETURNS_NULL = True
++    REGEXP_EXTRACT_POSITION_OVERFLOW_RETURNS_NULL = False
+     """Whether REGEXP_EXTRACT returns NULL when the position arg exceeds the string length."""
+ 
+     REGEXP_EXTRACT_NO_MATCH_RETURNS_NULL = True

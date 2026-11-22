@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -23,7 +23,7 @@
+        AND s_state = 'TN'
+        AND ctr1.ctr_customer_sk = c_customer_sk
+ ORDER  BY c_customer_id
+-LIMIT 100;
++LIMIT 10;
+ WITH "customer_total_return" AS (
+   SELECT
+     "store_returns"."sr_customer_sk" AS "ctr_customer_sk",

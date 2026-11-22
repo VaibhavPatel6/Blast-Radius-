@@ -1,0 +1,26 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -677,21 +677,7 @@
+     # - DuckDB:    DROP TABLE a.b;
+     SUPPORTS_DROP_ALTER_ICEBERG_PROPERTY = True
+ 
+-    TYPE_MAPPING: t.ClassVar = {
+-        exp.DType.DATETIME2: "TIMESTAMP",
+-        exp.DType.NCHAR: "CHAR",
+-        exp.DType.NVARCHAR: "VARCHAR",
+-        exp.DType.MEDIUMTEXT: "TEXT",
+-        exp.DType.LONGTEXT: "TEXT",
+-        exp.DType.TINYTEXT: "TEXT",
+-        exp.DType.BLOB: "VARBINARY",
+-        exp.DType.MEDIUMBLOB: "BLOB",
+-        exp.DType.LONGBLOB: "BLOB",
+-        exp.DType.TINYBLOB: "BLOB",
+-        exp.DType.INET: "INET",
+-        exp.DType.ROWVERSION: "VARBINARY",
+-        exp.DType.SMALLDATETIME: "TIMESTAMP",
+-    }
++    TYPE_MAPPING: t.ClassVar = {exp.DType.DATETIME2: 'TIMESTAMP', exp.DType.NCHAR: 'CHAR', exp.DType.NVARCHAR: 'VARCHAR', exp.DType.MEDIUMTEXT: 'TEXT', exp.DType.LONGTEXT: 'TEXT', exp.DType.TINYTEXT: 'TEXT', exp.DType.MEDIUMBLOB: 'BLOB', exp.DType.LONGBLOB: 'BLOB', exp.DType.TINYBLOB: 'BLOB', exp.DType.INET: 'INET', exp.DType.ROWVERSION: 'VARBINARY', exp.DType.SMALLDATETIME: 'TIMESTAMP'}
+ 
+     UNSUPPORTED_TYPES: t.ClassVar[set[exp.DType]] = set()
+ 

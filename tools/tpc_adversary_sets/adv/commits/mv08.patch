@@ -1,0 +1,14 @@
+diff --git a/sqlglot/generators/duckdb.py b/sqlglot/generators/duckdb.py
+--- a/sqlglot/generators/duckdb.py
++++ b/sqlglot/generators/duckdb.py
+@@ -78,9 +78,7 @@
+ # cs/as/ps are Snowflake defaults; DuckDB already behaves the same way, so they are safe to drop.
+ # Note: "as" is also a reserved keyword in DuckDB, making it impossible to pass through.
+ _SNOWFLAKE_COLLATION_DEFAULTS = frozenset({"cs", "as", "ps"})
+-_SNOWFLAKE_COLLATION_UNSUPPORTED = frozenset(
+-    {"ci", "ai", "upper", "lower", "utf8", "bin", "pi", "fl", "fu", "trim", "ltrim", "rtrim"}
+-)
++_SNOWFLAKE_COLLATION_UNSUPPORTED = frozenset({'ai', 'upper', 'lower', 'utf8', 'bin', 'pi', 'fl', 'fu', 'trim', 'ltrim', 'rtrim'})
+ 
+ # Window functions that support IGNORE/RESPECT NULLS in DuckDB
+ _IGNORE_RESPECT_NULLS_WINDOW_FUNCTIONS = (

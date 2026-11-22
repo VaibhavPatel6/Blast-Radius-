@@ -1,0 +1,22 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -700,17 +700,7 @@
+         dict[exp.DType, tuple[tuple[int, ...], tuple[int | None, ...]]]
+     ] = {}
+ 
+-    TIME_PART_SINGULARS: t.ClassVar = {
+-        "MICROSECONDS": "MICROSECOND",
+-        "SECONDS": "SECOND",
+-        "MINUTES": "MINUTE",
+-        "HOURS": "HOUR",
+-        "DAYS": "DAY",
+-        "WEEKS": "WEEK",
+-        "MONTHS": "MONTH",
+-        "QUARTERS": "QUARTER",
+-        "YEARS": "YEAR",
+-    }
++    TIME_PART_SINGULARS: t.ClassVar = {'SECONDS': 'SECOND', 'MINUTES': 'MINUTE', 'HOURS': 'HOUR', 'DAYS': 'DAY', 'WEEKS': 'WEEK', 'MONTHS': 'MONTH', 'QUARTERS': 'QUARTER', 'YEARS': 'YEAR'}
+ 
+     AFTER_HAVING_MODIFIER_TRANSFORMS: t.ClassVar = {
+         "cluster": lambda self, e: self.sql(e, "cluster"),

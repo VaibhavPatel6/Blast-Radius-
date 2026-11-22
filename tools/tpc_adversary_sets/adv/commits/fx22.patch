@@ -1,0 +1,11 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -61,6 +61,7 @@
+ 
+ --------------------------------------
+ -- TPC-DS 2
++# execute: true
+ --------------------------------------
+ # execute: true
+ WITH wscs

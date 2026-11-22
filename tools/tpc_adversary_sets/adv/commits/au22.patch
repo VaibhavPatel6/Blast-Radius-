@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -940,7 +940,7 @@
+     Whether to prioritize non-literal types over literals during type annotation.
+     """
+ 
+-    ALIAS_POST_VERSION = True
++    ALIAS_POST_VERSION = False
+     """Whether the table alias comes after version (timestamp or iceberg snapshot)."""
+ 
+     # --- Autofilled ---

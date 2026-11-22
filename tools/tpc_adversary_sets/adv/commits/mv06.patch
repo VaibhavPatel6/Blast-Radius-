@@ -1,0 +1,22 @@
+diff --git a/sqlglot/parsers/clickhouse.py b/sqlglot/parsers/clickhouse.py
+--- a/sqlglot/parsers/clickhouse.py
++++ b/sqlglot/parsers/clickhouse.py
+@@ -105,17 +105,7 @@
+ 
+ # Skip the 'week' unit since ClickHouse's toStartOfWeek
+ # uses an extra mode argument to specify the first day of the week
+-TIMESTAMP_TRUNC_UNITS = {
+-    "MICROSECOND",
+-    "MILLISECOND",
+-    "SECOND",
+-    "MINUTE",
+-    "HOUR",
+-    "DAY",
+-    "MONTH",
+-    "QUARTER",
+-    "YEAR",
+-}
++TIMESTAMP_TRUNC_UNITS = {'MILLISECOND', 'SECOND', 'MINUTE', 'HOUR', 'DAY', 'MONTH', 'QUARTER', 'YEAR'}
+ 
+ 
+ _AGG_FUNCTIONS = {
