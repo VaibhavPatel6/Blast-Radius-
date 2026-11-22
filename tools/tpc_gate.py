@@ -4,7 +4,7 @@ and whether any dropped test really fails. Runs in the development image with th
 checkout at /app and the pinned tree at /opt/sqlglot:
 
     docker run --rm -e PYTHON_CPU_COUNT=1 -v $PWD:/app:ro -v $PINNED:/opt/sqlglot:ro \\
-        -v $SET:/set:ro br-dev:arm64 python /app/tools/tpc_gate.py new /set [/set2 ...]
+        -v $SET:/set:ro br-dev:arm64 python /app/tools/tpc_gate.py [--baseline FILE] [--estimate] new /set [/set2 ...]
 
 Mode `new` calls br.tpc.decide; mode `old` calls selector.decide_tpc (run it with /app at
 an older checkout to get the numbers before a change); mode `noop` compares the pinned tree
@@ -43,24 +43,94 @@ class AlwaysTime:
         return True
 
 
+def _module_global():
+    import datetime
+    import sqlglot.parsers.tsql as m
+    m.DEFAULT_START_DATE = m.DEFAULT_START_DATE + datetime.timedelta(days=1)
+    return "sqlglot.parsers.tsql.DEFAULT_START_DATE"
+
+
+def _class_attribute():
+    from sqlglot.dialects.tsql import TSQL
+    name = sorted(k for k, v in vars(TSQL).items() if type(v) is bool)[0]
+    setattr(TSQL, name, not getattr(TSQL, name))
+    return f"TSQL.{name}"
+
+
+def _lambda_swap():
+    import types
+    from br import state
+    from sqlglot.dialects.tsql import TSQL
+    for owner in (TSQL.Parser, TSQL.Generator, TSQL.Tokenizer):
+        for name, table in sorted(vars(owner).items()):
+            if type(table) is not dict:
+                continue
+            seen = {}
+            for k, v in table.items():
+                if isinstance(v, types.FunctionType):
+                    other = seen.get(v.__code__.co_qualname)
+                    if other is not None and state._code_hex(table[other].__code__) != state._code_hex(v.__code__):
+                        table[other], table[k] = table[k], table[other]
+                        return f"{owner.__qualname__}.{name}[{other!r}] <-> [{k!r}] ({v.__code__.co_qualname})"
+                    seen.setdefault(v.__code__.co_qualname, k)
+    raise RuntimeError("no same-named lambdas to swap")
+
+
+def selftest() -> int:
+    """The import-state comparison must see a changed module global, a changed class
+    attribute and two same-named lambdas swapped in a class table, and nothing on a no-op."""
+    from br import tpc
+    tpc._TEST_HOOK = None
+    assert tpc.pinned_rows(str(PINNED), "tpc-h", 300) is not None, "pinned side failed"
+    failures = 0
+    for name, hook, expect_same in (("no-op", None, True), ("module global", _module_global, False),
+                                    ("class attribute", _class_attribute, False),
+                                    ("lambda swap", _lambda_swap, False)):
+        tpc._TEST_HOOK = f"tools.tpc_gate:{hook.__name__}" if hook else None
+        same, why = tpc.compare(str(PINNED), str(PINNED), "tpc-h", 300, frozenset(), {}, True)
+        ok = same == expect_same and (expect_same or why.startswith("import state differs"))
+        failures += not ok
+        print(f"selftest {name}: {'PASS' if ok else 'FAIL'} same={same} ({why})", flush=True)
+    tpc._TEST_HOOK = None
+    return 1 if failures else 0
+
+
 def main() -> int:
-    mode, sets = sys.argv[1], [Path(p) for p in sys.argv[2:]]
-    import pytest  # noqa: F401 - as in the selector, before anything forks
+    args = sys.argv[1:]
+    baseline = None
+    use_estimate = "--estimate" in args
+    if use_estimate:
+        args.remove("--estimate")
+    if "--baseline" in args:
+        i = args.index("--baseline")
+        baseline = Path(args[i + 1])
+        del args[i:i + 2]
+    mode, sets = args[0], [Path(p) for p in args[1:]]
+    import pytest  # noqa: F401 - as in the selector
+    from br import tpc
+    tpc.BASELINE = baseline or Path("/nonexistent")
     if mode == "noop":
-        from br import tpc
+        # the pinned side (from the baseline when given) against a patched view of the
+        # pinned tree that changes nothing, at the patched trees' path
+        from br.patch import FileChange
+        from br.verify import build_tree, remove_tree
+        tree = Path("/tmp/br/noop-tpc")
+        text = read_pinned("sqlglot/time.py")
+        remove_tree(tree)
+        build_tree(tree, [FileChange("sqlglot/time.py", "sqlglot/time.py", text, text)])
         for benchmark in ("tpc-h", "tpc-ds"):
-            for side in ("pinned", "pinned again"):
-                t0 = cpu()
-                if side == "pinned":
-                    tpc._PINNED.pop(benchmark, None)
-                same, why = tpc.compare(str(PINNED), str(PINNED), benchmark, 120, None, frozenset())
-                print(f"{benchmark} {side}: same={same} {why} cpu {cpu() - t0:.2f}s", flush=True)
+            t0 = cpu()
+            rows = tpc.pinned_rows(str(PINNED), benchmark, 300)
+            t1 = cpu()
+            same, why = tpc.compare(str(PINNED), str(tree), benchmark, 300, None, {}, True)
+            print(f"{benchmark}: same={same} {why}; pinned side cpu {t1 - t0:.2f}s, patched side cpu {cpu() - t1:.2f}s"
+                  f" ({'baseline' if baseline else 'computed'})", flush=True)
         return 0
+    if mode == "selftest":
+        return selftest()
     maps = Maps(Path("/app/maps"))
     if mode == "old":
         import selector
-    else:
-        from br import tpc
     drops = misses = decided = 0
     for set_dir in sets:
         tests_path = set_dir / "tests.json"
@@ -89,8 +159,17 @@ def main() -> int:
                 kept, how = selector.decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits,
                                                 AlwaysTime(), True, maps)
             else:
+                saving_ms = None
+                if use_estimate:
+                    from selector import answer_cost, duration_ms
+                    durations = {t["number"]: duration_ms(t["seconds"]) for t in tests}
+                    everything = sorted(by_id[i]["number"] for i in ids if i in by_id)
+
+                    def saving_ms(drop, everything=everything, durations=durations):
+                        rest = [n for n in everything if n not in drop]
+                        return answer_cost(everything, durations) - answer_cost(rest, durations)
                 kept, how = tpc.decide(commit, changes, chosen, tests, changed_objects, class_edits,
-                                       str(PINNED), 120)
+                                       str(PINNED), 120, saving_ms=saving_ms)
             dropped = set(chosen) - set(kept)
             missed = dropped & failing
             drops += len(dropped)

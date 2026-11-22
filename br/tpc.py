@@ -13,14 +13,18 @@ When a patch changes only function code, none of it run during the execution par
 outcome is decided by three things, all compared here between the pinned tree and the
 patched tree in two processes forked from the selector:
 
-1. The state the imports leave behind: every attribute of every class and every module
-   global in every loaded sqlglot module (every sqlglot module is imported), digested
-   structurally as in br/state.py, but with functions digested by file, name, defaults
-   and closure and their code compared apart, so that exactly the changed functions' code
-   is left to 2 and 3. Taken after import, which is the state the spawned workers start
-   from (they import afresh, then only unpickle and run). Equal state means the changed function left nothing different behind at import, whatever
-   ran it there (metaclasses, templates the DuckDB generator parses while its class is
-   created).
+1. The state the imports leave behind, when a changed function runs at import
+   (maps/import_time.json; otherwise the imports run the same code on both trees): every
+   global and every class attribute of every loaded sqlglot module (both sides import
+   every sqlglot module), digested structurally as in br/state.py. A function is digested
+   by its file, name, code, defaults and closure; the patched code of each changed code
+   object, and of each one enclosing it, is first renamed to its pinned code digest
+   (`code_renames`, pairing code objects by position), so every other function, a nested
+   one included, is compared by its real code in place. Taken in a process forked right
+   after import, the state the spawned workers start from (they import afresh, then only
+   unpickle and run). Equal state means the changed function left nothing different
+   behind at import, whatever ran it there (metaclasses, templates the DuckDB generator
+   parses while its class is created).
 2. What every query's preparation produces: the pickle bytes the worker receives, a
    structural digest of the unpickled tree, and for executed queries the optimized tree
    (structure with types, plain and pretty SQL) and the DuckDB SQL. The digests read the
@@ -62,6 +66,16 @@ REFUSE_PREFIXES = ("tests/", "sqlglot/executor/", "sqlglot/planner.py")
 # Module globals that name the tree on disk or the import machinery, not program state.
 _SKIPPED_GLOBALS = {"__file__", "__cached__", "__spec__", "__loader__", "__path__", "__builtins__"}
 
+# Kinds br/state.py's digest cannot read, all found among sqlglot's module globals.
+_DICT_VIEWS = (type({}.keys()), type({}.values()), type({}.items()))
+_VALUE_TYPES = (__import__("datetime").date, __import__("datetime").datetime, __import__("datetime").time,
+                __import__("datetime").timedelta, __import__("decimal").Decimal)
+_LOCK_TYPES = (type(__import__("threading").RLock()), type(__import__("threading").Lock()))
+
+# Tuples sqlglot builds from a set, so their order follows memory addresses even on the
+# pinned tree (no test can depend on it): compared as sets.
+_UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
+
 _APP = Path(__file__).resolve().parent.parent
 _PINNED: dict[str, dict] = {}
 _MAPS: dict[str, object] = {}
@@ -85,33 +99,56 @@ def _sha(text: str) -> str:
 # ---------------------------------------------------------------- child side
 
 
-def _is_changed(key: str, changed: frozenset) -> bool:
-    """Whether the code of function `key` ("path|qualname") may differ only because the
-    patch changed it: it is a changed code object, nested in one, or encloses one (a
-    function's digest covers its nested code; br.analyze lists every code object whose
-    own code differs, so an enclosing function not listed has its own code unchanged)."""
-    path, _, qual = key.partition("|")
-    return any(path == p and (qual == q or qual.startswith(q + ".<locals>.") or q.startswith(qual + ".<locals>."))
-               for p, q in changed)
+def code_renames(changes) -> dict[str, str] | None:
+    """{patched code digest: pinned code digest} for every code object that differs between
+    the pinned and the patched text of the changed files: the changed code objects and the
+    ones enclosing them (a function's code digest covers its nested code). Code objects are
+    paired by position, as br.analyze pairs them. Every other function keeps its own digest,
+    so a function nested in a changed one, a different inner function returned by a changed
+    helper, or two same-named lambdas swapping places all show as a difference. None when
+    the pairing is ambiguous (two pinned digests for one patched digest) or a file does not
+    compile; the caller then keeps the test."""
+    from br import analyze, state
+
+    renames: dict[str, str] = {}
+
+    def walk(old, new) -> bool:
+        o, n = state._code_hex(old)[:16], state._code_hex(new)[:16]
+        if o != n:
+            if renames.get(n, o) != o:
+                return False
+            renames[n] = o
+        old_kids, new_kids = analyze._keyed_children(old), analyze._keyed_children(new)
+        return all(walk(old_kids[k], new_kids[k]) for k in old_kids if k in new_kids)
+
+    for ch in changes:
+        if ch.old_path is None or ch.new_path != ch.old_path or not ch.old_path.endswith(".py"):
+            return None
+        try:
+            old = analyze._compile(ch.old_text, ch.old_path)
+            new = analyze._compile(ch.new_text, ch.new_path)
+        except Exception:  # noqa: BLE001
+            return None
+        if old is None or new is None or not walk(old, new):
+            return None
+    return renames
 
 
-def _state() -> tuple[dict[str, str], dict[str, list[str]]]:
-    """Digests of every class and every module's globals in every loaded sqlglot module,
-    as in br/state.py except that functions are digested by file, name, defaults and
-    closure; their code is returned apart, {"path|qualname": [code digests]}, so that the
-    parent can ignore exactly the changed functions' code."""
+def _state(renames: dict[str, str]) -> dict[str, str]:
+    """{"module" or "module:Class": digest} for every loaded sqlglot module: its globals and
+    each of its classes' attributes, digested structurally as in br/state.py. A function is
+    digested by its file, qualified name, code, defaults and closure, its code digest passed
+    through `renames` (patched code of a changed function reads as its pinned code)."""
     from br import state
 
     root = os.getcwd().rstrip("/") + "/"
-    codes: dict[str, set] = {}
 
     class StateDigest(state._Digest):
         def _walk(self, v, h) -> None:
             if isinstance(v, types.FunctionType):
                 code = v.__code__
                 path = code.co_filename[len(root):] if code.co_filename.startswith(root) else code.co_filename
-                key = f"{path}|{code.co_qualname}"
-                codes.setdefault(key, set()).add(state._code_hex(code)[:16])
+                own = state._code_hex(code)[:16]
                 self.count += 1
                 if id(v) in self.stack:
                     self.cycles += 1
@@ -119,7 +156,7 @@ def _state() -> tuple[dict[str, str], dict[str, list[str]]]:
                     return
                 self.stack.add(id(v))
                 try:
-                    h.update(f"function:{key}(".encode())
+                    h.update(f"function:{path}|{code.co_qualname}|{renames.get(own, own)}(".encode())
                     self._walk(v.__defaults__, h)
                     self._walk(v.__kwdefaults__, h)
                     for cell in v.__closure__ or ():
@@ -130,6 +167,21 @@ def _state() -> tuple[dict[str, str], dict[str, list[str]]]:
                     h.update(b")")
                 finally:
                     self.stack.discard(id(v))
+                return
+            t = type(v)
+            if t in _DICT_VIEWS:
+                self.count += 1
+                h.update(f"{t.__name__}(".encode())
+                self._walk(list(v), h)
+                h.update(b")")
+                return
+            if t in _VALUE_TYPES:
+                self.count += 1
+                h.update(f"{t.__module__}.{t.__qualname__}:{v!r};".encode())
+                return
+            if t in _LOCK_TYPES:  # import locks: no program state
+                self.count += 1
+                h.update(f"lock:{t.__name__};".encode())
                 return
             super()._walk(v, h)
 
@@ -142,7 +194,10 @@ def _state() -> tuple[dict[str, str], dict[str, list[str]]]:
         for name, value in sorted(list(vars(module).items()), key=lambda p: p[0]):
             if name in _SKIPPED_GLOBALS:
                 continue
-            XX = h.hexdigest()[:24]
+            if (mod_name, name) in _UNORDERED_GLOBALS and type(value) is tuple:
+                value = frozenset(value)
+            h.update(name.encode() + b"=" + digest(value).encode() + b";")
+        out[mod_name] = h.hexdigest()[:24]
         for qual, cls in state._classes(module):
             h = hashlib.sha256(state._kind(cls).encode())
             for name, value in sorted(list(vars(cls).items()), key=lambda p: p[0]):
@@ -150,18 +205,7 @@ def _state() -> tuple[dict[str, str], dict[str, list[str]]]:
                     continue
                 h.update(name.encode() + b"=" + digest(value).encode() + b";")
             out[f"{mod_name}:{qual}"] = h.hexdigest()[:24]
-    return out, {k: sorted(v) for k, v in codes.items()}
-
-
-def _state_equal(row: dict, pinned: dict, changed: frozenset) -> bool:
-    """Same digests everywhere, the same functions held, and the same code for every one
-    of them that is not a changed function."""
-    if row.get("modules") != pinned.get("modules") or row.get("state") != pinned.get("state"):
-        return False
-    a, b = row.get("codes"), pinned.get("codes")
-    if a is None or b is None or set(a) != set(b):
-        return False
-    return all(a[k] == b[k] or _is_changed(k, changed) for k in a)
+    return out
 
 
 def _tree(root, expression_type) -> str:
@@ -217,10 +261,12 @@ class _Mark:
         self.text = text
 
 
-def _artifacts(benchmark: str, only, changed: frozenset, expected=None) -> list:
+def _artifacts(benchmark: str, only, renames: dict, with_state: bool, expected=None) -> list:
     """Runs in a forked child, inside the tree to judge: rows in the order computed. With
-    `expected` (the pinned rows, inherited through fork), stops at the first difference.
-    `only`: the executed queries to optimize (all when None)."""
+    `expected` (the pinned rows), stops at the first difference. `only`: the executed
+    queries to optimize (all when None). `with_state`: digest the import state (always on
+    the pinned side; on the patched side only when a changed function runs at import,
+    since otherwise the import runs the same code as on the pinned tree)."""
     import importlib
     import pkgutil
 
@@ -236,8 +282,9 @@ def _artifacts(benchmark: str, only, changed: frozenset, expected=None) -> list:
     from sqlglot.schema import ensure_schema
     from tests.helpers import TPCDS_SCHEMA, TPCH_SCHEMA, load_sql_fixture_pairs
 
-    # Every sqlglot module, so that what a changed import-time function leaves on shared
-    # classes while some other test in the same process loads a dialect is seen too.
+    # Every sqlglot module, on both sides alike: what a changed import-time function leaves
+    # on shared classes while another test in the same process loads a dialect is seen too,
+    # and the queries are prepared after the same imports whatever the patch.
     failed = []
     for info in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
         if info.name.rsplit(".", 1)[1] != "__main__":
@@ -245,6 +292,12 @@ def _artifacts(benchmark: str, only, changed: frozenset, expected=None) -> list:
                 importlib.import_module(info.name)
             except Exception as error:  # noqa: BLE001 - compared between the two sides
                 failed.append(f"{info.name}:{type(error).__name__}")
+    if _HOOK_IN_CHILD:
+        import importlib as _il
+        module, _, function = _HOOK_IN_CHILD.partition(":")
+        getattr(_il.import_module(module), function)()
+    loaded = sorted(m for m in sys.modules if m == "sqlglot" or m.startswith("sqlglot."))
+    modules = _sha(repr((loaded, failed)))
 
     out: list[dict] = []
 
@@ -252,55 +305,66 @@ def _artifacts(benchmark: str, only, changed: frozenset, expected=None) -> list:
         out.append(row)
         if expected is None:
             return True
-        return len(expected) >= len(out) and _matches(row, expected[len(out) - 1], changed)
+        return len(expected) >= len(out) and _matches(row, expected[len(out) - 1])
 
     # The import state is digested in a grandchild forked now (its memory is this process's
     # state at import) that waits until the queries have matched: a patch whose queries
     # differ, the usual case, never pays for the digest.
-    state = _Snapshot()
+    snapshot = _Snapshot(renames) if with_state else None
     schema = TPCDS_SCHEMA if benchmark == "tpc-ds" else TPCH_SCHEMA
     pairs = list(load_sql_fixture_pairs(f"optimizer/{benchmark}/{benchmark}.sql"))
     blobs: dict[int, bytes] = {}
-    for i, (meta, sql, _) in enumerate(pairs):  # the parent: parse and pickle every query
-        row = {"step": "parse", "query": i}
-        try:
-            blobs[i] = pickle.dumps(parse_one(sql))
-            row["pickle"] = hashlib.sha256(blobs[i]).hexdigest()[:24]
-        except Exception as error:  # noqa: BLE001 - an error is an outcome to compare too
-            row["error"] = type(error).__name__ + ":" + str(error)[:200]
-        if not emit(row):
-            state.discard()
-            return out
-    for i, (meta, sql, _) in enumerate(pairs):  # the workers, then the parent's comparisons
-        if i not in blobs:
-            continue
-        row = {"step": "run", "query": i}
-        try:
-            loaded = pickle.loads(blobs[i])
-            row["loaded"] = _tree(loaded, Expression)
-            if meta.get("execute"):
-                if only is None or i in only:
-                    optimized = optimize(loaded, ensure_schema(schema), leave_tables_isolated=True)
-                    row["optimized"] = _tree(optimized, Expression)
-                    row["sql"] = _sha(optimized.sql() + "\n" + optimized.sql(pretty=True))
-                row["duckdb"] = _sha(transpile(sql, write="duckdb")[0])
-        except Exception as error:  # noqa: BLE001
-            row["error"] = type(error).__name__ + ":" + str(error)[:200]
-        if not emit(row):
-            state.discard()
-            return out
-    row = state.collect()
-    if row is None:
-        raise RuntimeError("state digest failed")
-    row["modules"] = _sha(repr((row["modules"], failed)))
-    emit(row)
-    return out
+    try:
+        for i, (meta, sql, _) in enumerate(pairs):  # the parent: parse and pickle every query
+            row = {"step": "parse", "query": i}
+            try:
+                blobs[i] = pickle.dumps(parse_one(sql))
+                row["pickle"] = hashlib.sha256(blobs[i]).hexdigest()[:24]
+            except Exception as error:  # noqa: BLE001 - an error is an outcome to compare too
+                row["error"] = type(error).__name__ + ":" + str(error)[:200]
+            if not emit(row):
+                return out
+        for i, (meta, sql, _) in enumerate(pairs):  # the workers, then the parent's comparisons
+            if i not in blobs:
+                continue
+            row = {"step": "run", "query": i}
+            try:
+                loaded_tree = pickle.loads(blobs[i])
+                row["loaded"] = _tree(loaded_tree, Expression)
+                if meta.get("execute"):
+                    if only is None or i in only:
+                        optimized = optimize(loaded_tree, ensure_schema(schema), leave_tables_isolated=True)
+                        row["optimized"] = _tree(optimized, Expression)
+                        row["sql"] = _sha(optimized.sql() + "\n" + optimized.sql(pretty=True))
+                    row["duckdb"] = _sha(transpile(sql, write="duckdb")[0])
+            except Exception as error:  # noqa: BLE001
+                row["error"] = type(error).__name__ + ":" + str(error)[:200]
+            if not emit(row):
+                return out
+        row = {"step": "import", "modules": modules}
+        if snapshot is not None:
+            state = snapshot.collect()
+            snapshot = None
+            if state is None:
+                raise RuntimeError("state digest failed")
+            row["state"] = state
+        emit(row)
+        return out
+    finally:
+        if snapshot is not None:
+            snapshot.discard()
+
+
+# Self-tests only (tools/tpc_gate.py): "module:function" the child calls right after the
+# imports, to change one value and check that the comparison sees it.
+_TEST_HOOK = None
+_HOOK_IN_CHILD = None
 
 
 class _Snapshot:
     """A forked copy of the current process that digests its import state on request."""
 
-    def __init__(self):
+    def __init__(self, renames: dict):
         self.go_r, self.go_w = os.pipe()
         self.out_r, self.out_w = os.pipe()
         self.pid = os.fork()
@@ -308,14 +372,11 @@ class _Snapshot:
             os.close(self.go_w)
             os.close(self.out_r)
             try:
-                if os.read(self.go_r, 1) != b"g":
-                    os._exit(0)
-                state, codes = _state()
-                loaded = sorted(m for m in sys.modules if m == "sqlglot" or m.startswith("sqlglot."))
-                data = json.dumps({"step": "import", "modules": loaded, "state": state, "codes": codes}).encode()
-                view = memoryview(data)
-                while view:
-                    view = view[os.write(self.out_w, view):]
+                if os.read(self.go_r, 1) == b"g":
+                    data = json.dumps(_state(renames)).encode()
+                    view = memoryview(data)
+                    while view:
+                        view = view[os.write(self.out_w, view):]
             except BaseException:  # noqa: BLE001 - the parent sees no data and keeps the test
                 pass
             os._exit(0)
@@ -341,75 +402,86 @@ class _Snapshot:
             return None
 
 
-def _matches(row: dict, pinned: dict, changed: frozenset) -> bool:
+def _matches(row: dict, pinned: dict) -> bool:
     """A patched row equals the pinned row. The patched side may leave out the optimized
-    artifacts of an executed query outside `only`; nothing else may be missing, and an
-    error on either side is never a match."""
+    artifacts of an executed query outside `only`, and the import state when no changed
+    function runs at import; nothing else may be missing, and an error on either side is
+    never a match."""
     if row.get("step") != pinned.get("step") or row.get("query") != pinned.get("query"):
         return False
-    if "error" in row or "error" in pinned:
+    if "error" in row or "error" in pinned or not set(row) <= set(pinned):
         return False
-    if row["step"] == "import":
-        return _state_equal(row, pinned, changed)
-    if not set(row) <= set(pinned):
-        return False
-    skipped = {"optimized", "sql"} if "optimized" not in row else set()
+    skipped = set()
+    if row["step"] == "run" and "optimized" not in row:
+        skipped = {"optimized", "sql"}
+    if row["step"] == "import" and "state" not in row:
+        skipped = {"state"}
     return all(row.get(k) == pinned.get(k) for k in set(pinned) - skipped)
 
 
-def _child(tree: str, benchmark: str, write_fd: int, only, changed, expected) -> None:
+def _main_child() -> None:
+    """Entry of a child interpreter (see `_run`): arguments as JSON on stdin, rows as JSON
+    on stdout."""
+    global _HOOK_IN_CHILD
+    args = json.loads(sys.stdin.buffer.read())
+    _HOOK_IN_CHILD = args.get("hook")
+    out = os.fdopen(os.dup(1), "wb")
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
     try:
-        os.setpgid(0, 0)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)
-        os.dup2(devnull, 2)
-        os.chdir(tree)
-        sys.path.insert(0, tree)
-        data = json.dumps({"ok": True, "rows": _artifacts(benchmark, only, changed, expected)}).encode()
+        os.chdir(args["tree"])
+        sys.path.insert(0, args["tree"])
+        only = None if args["only"] is None else frozenset(args["only"])
+        rows = _artifacts(args["benchmark"], only, args["renames"], args["with_state"], args["expected"])
+        data = json.dumps({"ok": True, "rows": rows}).encode()
     except BaseException as exc:  # noqa: BLE001
         data = json.dumps({"ok": False, "why": repr(exc)[-300:]}).encode()
-    view = memoryview(data)
-    while view:
-        try:
-            view = view[os.write(write_fd, view):]
-        except OSError:
-            break
+    out.write(data)
+    out.flush()
     os._exit(0)
 
 
-def _run(tree: str, benchmark: str, timeout: float, only=None, changed=frozenset(), expected=None):
-    import select
-    import signal
-    import time
+# Both sides run in a fresh interpreter with this environment, never in a fork of the
+# selector: with a fixed hash seed every artifact, the import state and TPC-DS query 48's
+# parse included, came out identical across unrelated processes (different environment
+# sizes, working directories, import histories; tools/tpc_baseline.py diff), so the pinned
+# side can be computed at image build. With differing hash seeds the import state and
+# query 48 differ.
+CHILD_ENV = {"PYTHONHASHSEED": "0", "SKIP_INTEGRATION": "0", "PYTHON_CPU_COUNT": "1",
+             "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1", "LC_ALL": "C.UTF-8"}
 
-    read_fd, write_fd = os.pipe()
+
+def _run(tree: str, benchmark: str, timeout: float, only=None, renames=None, with_state=True, expected=None):
+    import signal
+    import subprocess
+
+    env = dict(CHILD_ENV, PATH=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"))
+    payload = json.dumps({"tree": tree, "benchmark": benchmark, "only": None if only is None else sorted(only),
+                          "renames": renames or {}, "with_state": with_state, "expected": expected,
+                          "hook": _TEST_HOOK}).encode()
+    code = f"import sys; sys.path.insert(0, {str(_APP)!r}); from br.tpc import _main_child; _main_child()"
     sys.stdout.flush()
     sys.stderr.flush()
-    pid = os.fork()
-    if pid == 0:
-        os.close(read_fd)
-        _child(tree, benchmark, write_fd, only, changed, expected)
-    os.close(write_fd)
-    chunks, end, ok = [], time.monotonic() + timeout, True
-    while True:
-        left = end - time.monotonic()
-        if left <= 0 or not select.select([read_fd], [], [], left)[0]:
-            ok = False
-            break
-        chunk = os.read(read_fd, 1 << 20)
-        if not chunk:
-            break
-        chunks.append(chunk)
     try:
-        os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    os.waitpid(pid, 0)
-    os.close(read_fd)
-    if not ok:
+        proc = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=env, cwd="/", start_new_session=True)
+    except OSError:
         return None
     try:
-        result = json.loads(b"".join(chunks))
+        data, _ = proc.communicate(payload, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        data = None
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+    if not data:
+        return None
+    try:
+        result = json.loads(data)
     except ValueError:
         return None
     return result["rows"] if result.get("ok") else None
@@ -417,42 +489,112 @@ def _run(tree: str, benchmark: str, timeout: float, only=None, changed=frozenset
 
 # ---------------------------------------------------------------- parent side
 
+# Pinned rows computed at image build (tools/tpc_baseline.py), if the image has them.
+BASELINE = _APP / "maps" / "tpc_pinned.json"
+
+
+def pinned_rows(pinned_tree: str, benchmark: str, timeout: float):
+    """The pinned rows: from the build-time baseline when present and made by this Python,
+    else computed once per run in a child forked from this process."""
+    if benchmark not in _PINNED:
+        rows = None
+        try:
+            data = json.loads(BASELINE.read_text())
+            if data.get("python") == sys.version and data.get("tree") == pinned_tree:
+                rows = data["rows"][benchmark]
+        except (OSError, ValueError, KeyError):
+            rows = None
+        if rows is None:
+            rows = _run(pinned_tree, benchmark, timeout)
+        _PINNED[benchmark] = None if rows is None or any("error" in r for r in rows) else rows
+    return _PINNED[benchmark]
+
 
 def compare(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
-            only, changed: frozenset) -> tuple[bool, str]:
-    """(same, why): whether the patched tree leaves the same state at import and after the
-    queries, and prepares every query to the same artifacts, as the pinned tree."""
-    if benchmark not in _PINNED:
-        rows = _run(pinned_tree, benchmark, timeout)
-        _PINNED[benchmark] = None if rows is None or any("error" in r for r in rows) else rows
-    expected = _PINNED[benchmark]
+            only, renames: dict, with_state: bool) -> tuple[bool, str]:
+    """(same, why): whether the patched tree prepares every query to the same artifacts,
+    loads the same modules and (with_state) leaves the same import state as the pinned one."""
+    expected = pinned_rows(pinned_tree, benchmark, timeout)
     if expected is None:  # not retried: every later commit would pay for it again
         return False, "pinned side failed"
-    rows = _run(patched_tree, benchmark, timeout, only, changed, expected)
+    rows = _run(patched_tree, benchmark, timeout, only, renames, with_state, expected)
     if rows is None:
         return False, "patched side failed or timed out"
     for row, pin in zip(rows, expected):
-        if not _matches(row, pin, changed):
+        if not _matches(row, pin):
             if row["step"] == "import":
+                if row.get("modules") != pin.get("modules"):
+                    return False, "loaded modules differ"
                 keys = sorted(k for k in set(row["state"]) | set(pin["state"])
                               if row["state"].get(k) != pin["state"].get(k))
-                funcs = sorted(k for k in set(row["codes"]) | set(pin["codes"])
-                               if row["codes"].get(k) != pin["codes"].get(k) and not _is_changed(k, changed))
-                return False, f"{row['step']} state differs: {','.join((keys + funcs)[:3]) or 'modules'}"
+                return False, f"import state differs: {','.join(keys[:3])}"
             return False, f"{row['step']} differs at query {row.get('query')}"
     if len(rows) != len(expected):
         return False, "fewer rows"
     return True, "same"
 
 
+# Expected CPU of the check (seconds, patched side; the pinned side comes from the
+# build-time baseline), from tools/tpc_cost.py on the amd64 entry image on 2026-11-22 at
+# load 17-20 (not quiet: these overstate a quiet run, which itself runs about 1.5 times
+# faster than the scorer, so they are used as scorer-scale as they are):
+#   tpc-ds early 1.5-1.6, base 3.9-4.6, all 57 executed queries optimized 21-27, +state 2.5-3
+#   tpc-h  early 2.5-2.6, base 2.3-2.8, +state 3.0
+EST = {"tpc-ds": {"early": 2.0, "base": 4.3, "per_optimized": 0.35, "state": 2.7},
+       "tpc-h": {"early": 2.5, "base": 2.5, "per_optimized": 0.0, "state": 3.0}}
+# Without a baseline the pinned side is computed once per run: about base + all optimized
+# + state for tpc-ds, base + state for tpc-h.
+EST_PINNED = {"tpc-ds": 4.3 + 0.35 * 57 + 2.7, "tpc-h": 2.5 + 3.0}
+# Share of comparisons that ended in a drop on the labeled sets (tools/tpc_gate.py:
+# 15 drops in 31 comparisons on e6-tpcds and the sample).
+P_DROP = 0.45
+
+
+def _executed() -> dict[str, frozenset] | None:
+    """Executed query indexes per benchmark, from the pinned rows when loaded."""
+    out = {}
+    for b, rows in _PINNED.items():
+        if rows is None:
+            return None
+        out[b] = frozenset(r["query"] for r in rows if r["step"] == "run" and "optimized" in r)
+    return out
+
+
+def worth_it(present: dict, affected: dict, at_import: bool, saving_ms) -> tuple[dict, str]:
+    """The subset of `present` ({test number: benchmark}) whose comparison is expected to
+    save more than it costs: P_DROP * saving against P_DROP * (cost of a full comparison)
+    + (1 - P_DROP) * (cost of an early exit), with the pinned side added once when it is
+    not loaded yet. Returns ({}, why) when no subset pays."""
+    executed = _executed() or {}
+
+    def cpu(b: str) -> float:
+        e = EST[b]
+        reach = len(affected[b] & executed[b]) if b in executed else len(affected[b])
+        full = e["base"] + e["per_optimized"] * reach + (e["state"] if at_import else 0.0)
+        return P_DROP * full + (1 - P_DROP) * e["early"] + (0.0 if b in _PINNED else EST_PINNED[b])
+
+    best, best_net, note = {}, 0.0, ""
+    items = sorted(present.items())
+    for mask in range(1, 1 << len(items)):
+        subset = dict(x for i, x in enumerate(items) if mask >> i & 1)
+        gain = P_DROP * saving_ms(sorted(subset)) / 1000
+        cost = sum(cpu(b) for b in subset.values())
+        note += f"{'+'.join(sorted(subset.values()))} gain {gain:.1f}s cpu {cost:.1f}s; "
+        if gain - cost > best_net:
+            best, best_net = subset, gain - cost
+    return best, note.rstrip("; ")
+
+
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, pinned_tree: str, timeout: float, log=lambda message: None,
-           work_root: str = "/tmp/br") -> tuple[list[int], str]:
+           work_root: str = "/tmp/br", saving_ms=None) -> tuple[list[int], str]:
     """The whole TPC decision for one patch: (tests still listed, a note for the log).
 
     `chosen` are the test numbers the selector would list; `tests` is tests.json's list;
-    `changed_objects` and `class_edits` come from br.analyze.candidates. Drops a TPC test
-    only on the evidence described in this module's docstring; any doubt keeps it."""
+    `changed_objects` and `class_edits` come from br.analyze.candidates. `saving_ms`, when
+    given, maps a list of test numbers to the answer-cost saving (ms) of leaving them out;
+    the check then runs only when its expected saving beats its expected CPU. Drops a TPC
+    test only on the evidence described in this module's docstring; any doubt keeps it."""
     from br.verify import build_tree, remove_tree
 
     by_number = {t["number"]: t for t in tests}
@@ -483,7 +625,16 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
             del present[n]
     if not present:
         return chosen, f" | tpc: kept ({'; '.join(notes)})"
-    changed = frozenset((p, q) for p, q, _, _ in changed_objects)
+    if saving_ms is not None:
+        for b in set(present.values()):  # loads the baseline, if the image has one
+            pinned_rows(pinned_tree, b, timeout) if BASELINE.exists() else None
+        worth, estimate_note = worth_it(present, affected, at_import, saving_ms)
+        if not worth:
+            return chosen, f" | tpc: kept (not worth it: {estimate_note})"
+        present = worth
+    renames = code_renames(changes)
+    if renames is None:
+        return chosen, " | tpc: kept (changed code cannot be paired)"
     tree = Path(work_root) / (commit + "-tpc")
     dropped = []
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -491,8 +642,8 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
         remove_tree(tree)
         build_tree(tree, changes)
         for n, benchmark in sorted(present.items()):
-            same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], changed)
-            notes.append(f"{benchmark} {why}")
+            same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], renames, at_import)
+            notes.append(f"{benchmark} {why} ({len(affected[benchmark])} queries reach the change)")
             if same:
                 dropped.append(n)
     except Exception as error:  # noqa: BLE001
@@ -509,6 +660,6 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
 
 def same_as_pinned(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
                    only: frozenset | None = None) -> bool:
-    """The selector's earlier call. No changed function is named, so any changed function
-    held in class or module state reads as a difference, which keeps the test listed."""
-    return compare(pinned_tree, patched_tree, benchmark, timeout, only, frozenset())[0]
+    """The selector's earlier call. No renames are known, so any changed function held in
+    class or module state reads as a difference, which keeps the test listed."""
+    return compare(pinned_tree, patched_tree, benchmark, timeout, only, {}, True)[0]
