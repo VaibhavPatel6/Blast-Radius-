@@ -500,20 +500,11 @@ def _artifacts(benchmark: str, only, renames: dict, with_state: bool, expected=N
     from sqlglot.schema import ensure_schema
     from tests.helpers import TPCDS_SCHEMA, TPCH_SCHEMA, load_sql_fixture_pairs
 
-    # Every sqlglot module, on both sides alike: what a changed import-time function leaves
-    # on shared classes while another test in the same process loads a dialect is seen too,
-    # and the queries are prepared after the same imports whatever the patch.
-    failed = []
-    for info in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
-        if info.name.rsplit(".", 1)[1] != "__main__":
-            try:
-                importlib.import_module(info.name)
-            except Exception as error:  # noqa: BLE001 - compared between the two sides
-                failed.append(f"{info.name}:{type(error).__name__}")
-    if _HOOK_IN_CHILD:
-        import importlib as _il
-        module, _, function = _HOOK_IN_CHILD.partition(":")
-        getattr(_il.import_module(module), function)()
+    # The queries are prepared after the imports the real test's own module makes, and no
+    # more: dialects then load lazily through the dialect registry, as in the test (a patch
+    # that breaks lazy loading must fail here as it fails there). The import-state digest
+    # imports every sqlglot module itself, in the forked snapshot (_Snapshot).
+    failed: list = []
     loaded = sorted(m for m in sys.modules if m == "sqlglot" or m.startswith("sqlglot."))
     modules = _sha(repr((loaded, failed)))
 
@@ -602,7 +593,27 @@ class _Snapshot:
             os.close(self.out_r)
             try:
                 if os.read(self.go_r, 1) == b"g":
-                    data = json.dumps(_state(renames)).encode()
+                    # every sqlglot module, so that what a changed import-time function
+                    # leaves on shared classes while another test loads a dialect is seen
+                    import importlib
+                    import pkgutil
+
+                    import sqlglot
+
+                    failed = []
+                    for info in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
+                        if info.name.rsplit(".", 1)[1] != "__main__":
+                            try:
+                                importlib.import_module(info.name)
+                            except Exception as error:  # noqa: BLE001 - compared between the sides
+                                failed.append(f"{info.name}:{type(error).__name__}")
+                    if _HOOK_IN_CHILD:  # self-tests: change one value of the import state
+                        module, _, function = _HOOK_IN_CHILD.partition(":")
+                        getattr(importlib.import_module(module), function)()
+                    state = _state(renames)
+                    loaded = sorted(m for m in sys.modules if m == "sqlglot" or m.startswith("sqlglot."))
+                    state["summary"]["__all_modules__"] = _sha(repr((loaded, failed)))
+                    data = json.dumps(state).encode()
                     view = memoryview(data)
                     while view:
                         view = view[os.write(self.out_w, view):]

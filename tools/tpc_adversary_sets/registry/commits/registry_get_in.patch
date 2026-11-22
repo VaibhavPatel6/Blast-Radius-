@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2..1881a20 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -298,7 +298,7 @@ class _Dialect(type):
+ 
+     @classmethod
+     def get(cls, key: str, default: Type[Dialect] | None = None) -> Type[Dialect] | None:
+-        if key not in cls._classes:
++        if key in cls._classes:
+             cls._try_load(key)
+ 
+         return cls._classes.get(key, default)
