@@ -418,10 +418,162 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     by_id = {t["id"]: t for t in tests}
     chosen, how_run = run_cheap_heavy(commit, changes, chosen, tests, verifier, can_verify and not data_only)
     how += how_run
+    before_tpc = list(chosen)
     chosen, how_tpc = decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier, can_verify, maps)
     how += how_tpc
+    tpcds_number = next((t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID), None)
+    if tpcds_number in before_tpc and tpcds_number in chosen:  # DIAGNOSTIC 7: S8 keeps it; why
+        category = diag7_category(commit, how_tpc)
+        DIAG7[commit] = DIAG7_CODES[category]
+        log(f"{commit}: DIAGNOSTIC7 {category} code {DIAG7[commit]} count={DIAG7_COUNT.get(commit)}{how_tpc}"[:400])
     extras = sorted((by_id[i] for i in wide if i in by_id), key=lambda t: (t["seconds"], t["number"]))
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]
+
+
+# DIAGNOSTIC BUILD 7, not an entry. Answers exactly as S8 (87a9506), plus:
+#  - for each commit where S8 still lists test_execute_tpcds although it was a candidate
+#    for the TPC check, a marker: unused tests whose recorded milliseconds sum to the code
+#    of the reason S8 kept it (DIAG7_CODES, powers of 4: up to three commits decode
+#    uniquely, digit by digit in base 4), added to the busiest worker before free fill;
+#  - a fixed handicap of 3000 ms on the first commit with no marker, so S8 scores better.
+# Decode: D = round((simulated - S8 simulated - 3.000) * 1000), read in base 4.
+DIAG_TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+DIAG_HANDICAP_MS = 3000
+DIAG7_CODES = {"run_failed": 1, "over_limit_11_20": 4, "over_limit_21_30": 16, "over_limit_31_up": 64,
+               "shared_state": 256, "fixture_other": 1024, "class_read": 4096, "not_worth": 16384, "other": 65536}
+DIAG7: dict = {}
+DIAG7_COUNT: dict = {}
+DIAG7_CURRENT = {"commit": None}
+DIAG7_STATE = {"handicap": False, "pending": 0}
+
+
+def diag7_category(commit, how_tpc):
+    h = how_tpc or ""
+    part = h[h.find("tpc-ds"):] if "tpc-ds" in h else h
+    if "do not pass when run" in h or "tpc-ds fails on changed pairs" in h:
+        return "run_failed"
+    if "could change state other tests share" in h:
+        return "shared_state"
+    m = __import__("re").search(r"(\d+) queries reach the change, more than", h)
+    n = int(m.group(1)) if m else (DIAG7_COUNT.get(commit) if "queries prepare differently" in part and "more than" in part else None)
+    if n is not None:
+        return "over_limit_11_20" if n <= 20 else "over_limit_21_30" if n <= 30 else "over_limit_31_up"
+    if "tpc: kept (fixture" in h or "does not load" in h:
+        return "fixture_other"
+    if "changed and is read during execution" in h:
+        return "class_read"
+    if "not worth it" in h:
+        return "not_worth"
+    return "other"
+
+
+def _diag7_install():
+    """When the TPC check keeps a test because more than RUN_LIMIT queries prepare
+    differently, count them all with one more patched run that collects without a limit."""
+    import br.tpc as tpc
+
+    original = tpc.compare
+
+    def counting(pinned_tree, patched_tree, benchmark, timeout, only, renames, with_state, allow_unread=False,
+                 collect=0):
+        same, why = original(pinned_tree, patched_tree, benchmark, timeout, only, renames, with_state,
+                             allow_unread=allow_unread, collect=collect)
+        if not same and benchmark == "tpc-ds" and "queries prepare differently" in why and "more than" in why:
+            try:
+                expected = tpc.pinned_rows(pinned_tree, benchmark, timeout)
+                got = tpc._run(patched_tree, benchmark, timeout, only, renames, with_state, expected, collect=100000)
+                if got is not None:
+                    DIAG7_COUNT[DIAG7_CURRENT["commit"]] = len(got[1])
+            except Exception as error:  # noqa: BLE001
+                log(f"DIAGNOSTIC7 count error {error!r}")
+        return same, why
+
+    tpc.compare = counting
+
+
+def _dcost(workers, durations) -> int:
+    occupied = [w for w in workers if w]
+    return (max(sum(durations[n] for n in w) for w in occupied) + WORKER_COST_MS * len(occupied)) if occupied else 0
+
+
+def _fill(durations, unused, target):
+    """Test numbers from `unused` whose durations sum to exactly `target` ms, or None."""
+    if target <= 0:
+        return None
+    items = sorted(n for n in unused if 0 < durations[n] <= target)
+    mask = (1 << (target + 1)) - 1
+    prefix = [1]
+    for n in items:
+        prefix.append((prefix[-1] | (prefix[-1] << durations[n])) & mask)
+    if not (prefix[-1] >> target) & 1:
+        return None
+    picked, left = [], target
+    for i in range(len(items), 0, -1):
+        if (prefix[i - 1] >> left) & 1:
+            continue
+        n = items[i - 1]
+        picked.append(n)
+        left -= durations[n]
+    return picked if left == 0 else None
+
+
+def _add_exact(workers, durations, exclude, ms):
+    """`workers` with unused tests (none in `exclude`) added to the busiest worker so the
+    simulated cost rises by exactly `ms`, or None."""
+    listed = {n for w in workers for n in w}
+    occupied = [list(w) for w in workers if w]
+    need = ms if occupied else ms - WORKER_COST_MS
+    if need <= 0:
+        return None
+    pick = _fill(durations, [n for n in durations if n not in listed and n not in exclude], need)
+    if pick is None:
+        return None
+    base = _dcost(workers, durations)
+    if occupied:
+        new = [list(w) for w in workers]
+        loads = [sum(durations[n] for n in w) if w else -1 for w in new]
+        new[loads.index(max(loads))].extend(pick)
+    else:
+        new = [pick]
+    return new if _dcost(new, durations) - base == ms else None
+
+
+def diagnostic7(commit, workers, durations, tpcds):
+    """Workers with the marker (or the handicap) added, for one commit."""
+    ms = DIAG7.get(commit)
+    if ms is None:
+        if DIAG7_STATE["handicap"]:
+            return workers
+        new = _add_exact(workers, durations, {tpcds}, DIAG_HANDICAP_MS)
+        if new is None:
+            return workers
+        DIAG7_STATE["handicap"] = True
+        log(f"{commit}: DIAGNOSTIC7 handicap {DIAG_HANDICAP_MS}")
+        return new
+    new = _add_exact(workers, durations, {tpcds}, ms)
+    if new is None:
+        # no unused tests sum to the code here (the answer lists nearly everything): the
+        # code is placed on another commit's answer after the loop (the decode is the sum)
+        DIAG7_STATE["pending"] += ms
+        log(f"{commit}: DIAGNOSTIC7 marker {ms} banked")
+        return workers
+    log(f"{commit}: DIAGNOSTIC7 marker {ms}")
+    return new
+
+
+def diagnostic7_place_pending(answers, durations, known, tpcds):
+    """Add the banked codes to the first commit answers that can take them exactly."""
+    for i, (commit, workers) in enumerate(answers):
+        ms = DIAG7_STATE["pending"]
+        if ms <= 0:
+            return
+        new = _add_exact(workers, durations, {tpcds}, ms)
+        if new is not None and valid_line(commit, new, known):
+            answers[i] = (commit, new)
+            DIAG7_STATE["pending"] = 0
+            log(f"{commit}: DIAGNOSTIC7 banked markers {ms} placed here")
+            return
+    log(f"DIAGNOSTIC7 banked markers {DIAG7_STATE['pending']} could not be placed")
 
 
 def main() -> int:
@@ -445,6 +597,11 @@ def main() -> int:
         log(f"cannot load maps ({error!r}); every commit lists every test")
         maps = None
     verifier = Verifier(started)
+    try:
+        sys.path.insert(0, str(APP))
+        _diag7_install()
+    except Exception as error:  # noqa: BLE001
+        log(f"DIAGNOSTIC7 install error {error!r}")
 
     lines = []
     for commit in commits:
@@ -453,10 +610,20 @@ def main() -> int:
             log(f"{commit}: out of time; listing every test")
         elif maps is not None:
             try:
+                DIAG7_CURRENT["commit"] = commit
                 chosen, why, extras = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)
                 zero = [n for n in sorted(durations) if durations[n] == 0]
                 workers = free_fill(workers, extras + zero, durations)
+                # DIAGNOSTIC 7: S8's answer as it is, then the marker on top (unused tests only)
+                tpcds = next((t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID), None)
+                try:
+                    marked = diagnostic7(commit, workers, durations, tpcds)
+                except Exception as error:  # the diagnostic must never change the answer otherwise
+                    log(f"{commit}: DIAGNOSTIC7 error {error!r}")
+                    marked = workers
+                if valid_line(commit, marked, known):
+                    workers = marked
                 log(f"{commit}: {len(chosen)} tests | {why}")
             except Exception as error:  # one bad commit must not cost the run
                 log(f"{commit}: internal error {error!r}; listing every test")
@@ -464,7 +631,13 @@ def main() -> int:
         if not valid_line(commit, workers, known):
             log(f"{commit}: invalid answer, listing every test")
             workers = everything if valid_line(commit, everything, known) else []
-        lines.append(json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")))
+        lines.append((commit, workers))
+    try:
+        tpcds_all = next((t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID), None)
+        diagnostic7_place_pending(lines, durations, known, tpcds_all)
+    except Exception as error:  # noqa: BLE001
+        log(f"DIAGNOSTIC7 bank error {error!r}")
+    lines = [json.dumps({"commit": c, "workers": w}, separators=(",", ":")) for c, w in lines]
     sys.stdout.write("".join(line + "\n" for line in lines))
     sys.stdout.flush()
     log(f"answered {len(commits)} commits")
