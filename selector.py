@@ -229,6 +229,7 @@ def answer_cost(numbers: list[int], durations: dict[int, int]) -> int:
 
 _TPC_EXECUTION: set | None = None
 _IMPORT_TIME: set | None = None
+_TPC_QUERIES: dict | None = None
 # A function entered by nearly every test run alone is almost certainly run at import.
 IMPORT_LIKE_ENTRANTS = 1500
 
@@ -264,6 +265,18 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
         return chosen, " | tpc: kept (changed code runs at import)"
     if maps is None or any(len(maps.entered(p, q, n)) > IMPORT_LIKE_ENTRANTS for p, q, n, _ in changed_objects):
         return chosen, " | tpc: kept (changed code entered by nearly every test)"
+    global _TPC_QUERIES
+    if _TPC_QUERIES is None:
+        _TPC_QUERIES = json.loads((APP / "maps" / "tpc_queries.json").read_text())
+    keys = [f"{p}|{q}|{n}" for p, q, n, _ in changed_objects]
+    affected = {b: frozenset(i for k in keys for i in _TPC_QUERIES.get(b, {}).get(k, [])) for b in set(present.values())}
+    free = [n for n, b in present.items() if not affected[b]]
+    if free:  # no query reaches the changed code while being prepared
+        names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in free)
+        chosen = [n for n in chosen if n not in free]
+        present = {n: b for n, b in present.items() if n not in free}
+        if not present:
+            return chosen, f" | tpc: dropped [{names}] (no query reaches the change)"
     tree = Path("/tmp/br") / (commit + "-tpc")
     dropped = []
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -271,7 +284,7 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
         remove_tree(tree)
         build_tree(tree, changes)
         for n, benchmark in sorted(present.items()):
-            if same_as_pinned(str(PINNED), str(tree), benchmark, TPC_TIMEOUT):
+            if same_as_pinned(str(PINNED), str(tree), benchmark, TPC_TIMEOUT, affected[benchmark]):
                 dropped.append(n)
     except Exception as error:
         return chosen, f" | tpc: kept (error {error!r})"
