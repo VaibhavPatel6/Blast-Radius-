@@ -1043,6 +1043,39 @@ def _test_file_refusal(ch, changed_objects, class_edits, maps) -> str | None:
     why = mutation_refusal([ch])
     if why:
         return f"{path}: {why}"
+    why = _patching_refusal(ch)
+    if why:
+        return f"{path}: {why}"
+    return None
+
+
+# Names through which a test function can change shared state with only a string constant
+# changed (a mock or patch target, an attribute set by name, a registration).
+_PATCHING_NAMES = {"mock", "patch", "Mock", "MagicMock", "monkeypatch", "setattr", "delattr", "object"}
+
+
+def _patching_refusal(ch) -> str | None:
+    """A changed test function that refers to mock, patch, setattr or a register* call:
+    a changed constant inside such a call can change shared state (a different patch
+    target, a different registry key) without any change the shared-state rule sees."""
+    from br import analyze
+
+    try:
+        old, new = analyze._compile(ch.old_text, ch.old_path), analyze._compile(ch.new_text, ch.new_path)
+    except Exception:  # noqa: BLE001
+        return f"{ch.old_path} does not compile"
+    todo = [(old, new)]
+    while todo:
+        o, n = todo.pop()
+        ok, nk = analyze._keyed_children(o), analyze._keyed_children(n)
+        todo.extend((ok[k], nk[k]) for k in ok if k in nk)
+        if analyze._own_signature(o) == analyze._own_signature(n):
+            continue
+        for code in (o, n):
+            names = set(code.co_names) | set(code.co_varnames)
+            hit = sorted(names & _PATCHING_NAMES) or sorted(x for x in names if x.lower().startswith("register"))
+            if hit:
+                return f"{code.co_qualname} refers to {hit[0]} (a mock, patch or registration)"
     return None
 
 
