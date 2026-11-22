@@ -343,6 +343,9 @@ def _run_probe(tree: str, modules: list[str], timeout: float) -> dict | None:
     return result if result.get("ok") else None
 
 
+_PINNED_CACHE: dict[tuple, dict] = {}
+
+
 def changed_attributes(pinned_tree: str, patched_tree: str, modules: list[str], timeout: float):
     """Import the same modules from the pinned tree and from the patched view, in two fresh
     forked processes, and return {("module", "Class.Qual"): {attribute names}} that differ,
@@ -354,9 +357,13 @@ def changed_attributes(pinned_tree: str, patched_tree: str, modules: list[str], 
     in one of the patched modules; elsewhere it is noise from the import machinery
     (abc caches, dataclass fields) and is ignored.
     """
-    old = _run_probe(pinned_tree, modules, timeout)
+    key = (pinned_tree, tuple(modules))
+    old = _PINNED_CACHE.get(key)  # the pinned side depends only on the module list
     if old is None:
-        return None
+        old = _run_probe(pinned_tree, modules, timeout)
+        if old is None:
+            return None
+        _PINNED_CACHE[key] = old
     new = _run_probe(patched_tree, modules, timeout)
     if new is None:
         return None
