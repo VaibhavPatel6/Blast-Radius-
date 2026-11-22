@@ -191,6 +191,10 @@ def code_renames(changes) -> dict[str, str] | None:
 _STORES = {"STORE_GLOBAL", "DELETE_GLOBAL", "STORE_ATTR", "DELETE_ATTR", "STORE_SUBSCR", "DELETE_SUBSCR",
            "STORE_SLICE", "DELETE_SLICE"}
 _COPY_WORDS = {"copy", "inplace", "deep", "mutate"}
+# Instructions that use a name (attribute, method, global, import); counted per use.
+_NAME_OPS = {"LOAD_ATTR", "LOAD_METHOD", "LOAD_GLOBAL", "LOAD_NAME", "LOAD_SUPER_ATTR", "LOAD_FROM_DICT_OR_GLOBALS",
+             "STORE_ATTR", "DELETE_ATTR", "STORE_GLOBAL", "DELETE_GLOBAL", "STORE_NAME", "DELETE_NAME",
+             "IMPORT_NAME", "IMPORT_FROM"}
 # The strict part of the shared-state rule: a changed function (pinned or patched) that
 # writes anywhere, or calls a method that changes its receiver, is refused, so that a
 # flipped condition in front of an existing write cannot get through.
@@ -200,8 +204,8 @@ _MUTATING_METHODS = {"pop", "popitem", "append", "extend", "insert", "remove", "
 
 
 def _effects(code: types.CodeType):
-    """What a code object's own instructions could do to shared state: the names it uses
-    (attribute and global names: get versus pop, copy, dict, update), its store and delete
+    """What a code object's own instructions could do to shared state: each use of a name,
+    counted per instruction (get versus pop at one call site, copy, dict, update), its store and delete
     instructions, its in-place operators, and its constants when a call passes a keyword
     such as copy= (copy=True -> False makes an unchanged callee change its argument): the
     value given to each such keyword, or all constants when that value is not a plain load."""
@@ -240,7 +244,10 @@ def _effects(code: types.CodeType):
             else:
                 unclear = True
     consts = [c for c in code.co_consts if not isinstance(c, types.CodeType)] if unclear else None
-    return collections.Counter(code.co_names), stores, inplace, (copy_values, consts)
+    # every use of a name, per instruction: one .get turned into .pop at one call site is a
+    # difference even when the function already uses both names elsewhere
+    names = collections.Counter((ins.opname, str(ins.argval)) for ins in instructions if ins.opname in _NAME_OPS)
+    return names, stores, inplace, (copy_values, consts)
 
 
 def mutation_refusal(changes) -> str | None:
@@ -292,8 +299,8 @@ def mutation_refusal(changes) -> str | None:
             (old_names, old_stores, old_inplace, old_consts) = _effects(o)
             (new_names, new_stores, new_inplace, new_consts) = _effects(n)
             if old_names != new_names:
-                diff = sorted((set(new_names) ^ set(old_names)) or {"counts"})
-                return f"{n.co_qualname} uses different names ({', '.join(diff[:3])})"
+                diff = sorted({name for (_, name) in (old_names - new_names) + (new_names - old_names)})
+                return f"{n.co_qualname} uses names differently ({', '.join(diff[:3])})"
             if old_stores != new_stores or old_inplace != new_inplace:
                 return f"{n.co_qualname} stores, deletes or updates in place differently"
             if old_consts != new_consts:
