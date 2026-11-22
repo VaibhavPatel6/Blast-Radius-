@@ -169,6 +169,28 @@ iterating sets of classes, whose order follows memory addresses and differs betw
 imports. Both sides are forked from the same process, so they share a hash seed; a no-op
 comparison of typical modules reports no differences.
 
+## The TPC executor tests (`br/tpc.py`, `decide_tpc` in `selector.py`)
+
+`test_execute_tpcds` (21.5 s) and `test_execute_tpch` (3.9 s) parse each benchmark query,
+pickle it to a worker process, run sqlglot's own executor there (optimize, plan,
+execute), and compare the rows with DuckDB's answer for the query transpiled to DuckDB.
+
+When a patch changes only function code, none of which runs during the *execution* part
+(a map of those code objects, `maps/tpc_exec.json`, is recorded from the pinned commit by
+`tools/covmap/tpcds_phases.py`), and touches no tests, fixtures, executor or planner file,
+then everything the execution part receives is determined by what sqlglot prepares before
+it: the parse tree after the pickle round trip, the optimized tree (its SQL, its full
+structure and the types inferred for every node), and the DuckDB transpilation. We compute
+those for every query on the pinned tree and on the patched view, in two processes forked
+from the selector; if every query's digests are equal, the test behaves exactly as at the
+pinned commit, where it passes, and it is left out. Any difference, error or timeout keeps
+it. The patched side stops at the first differing query. Both sides must come from the
+same parent process: the parse of one TPC-DS query depends on what earlier parses left in
+the process and on memory-address order, so digests made at image build do not match.
+
+`test_generator_memory` (6.7 s) is simply run in a child when it is a candidate and
+leaving it out would save more than about 2.5 s; a pass drops it.
+
 ## Free fill (`free_fill` in `selector.py`)
 
 The scorer charges the busiest worker plus 2 s per worker, so a test that fits under the

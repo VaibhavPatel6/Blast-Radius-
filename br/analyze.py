@@ -243,7 +243,7 @@ def _listing_dir(path: str, is_dir) -> str:
 
 
 def candidates(changes, maps: Maps, is_dir, class_edits: list | None = None,
-               wide: set | None = None) -> tuple[set[str], list[str]]:
+               wide: set | None = None, changed_objects: list | None = None) -> tuple[set[str], list[str]]:
     """is_dir(relative path) says whether a directory exists in the pinned tree.
 
     With `class_edits` (a list), a changed class body does not add its importers to the
@@ -279,7 +279,7 @@ def candidates(changes, maps: Maps, is_dir, class_edits: list | None = None,
             parts = [(ch.old_path or ch.new_path, ch.old_text, ch.new_text)]
         for path, old, new in parts:
             touched = ch.touched if (old is not None and new is not None) else None
-            got, why = _file_candidates(path, old, new, maps, is_dir, class_edits, touched, wide)
+            got, why = _file_candidates(path, old, new, maps, is_dir, class_edits, touched, wide, changed_objects)
             found |= got
             reasons.append(f"{path}: {why} -> {len(got)}")
     return found, reasons
@@ -287,7 +287,7 @@ def candidates(changes, maps: Maps, is_dir, class_edits: list | None = None,
 
 def _file_candidates(path: str, old: str | None, new: str | None, maps: Maps, is_dir,
                      class_edits: list | None = None, touched: set | None = None,
-                     wide: set | None = None) -> tuple[set[str], str]:
+                     wide: set | None = None, changed_objects: list | None = None) -> tuple[set[str], str]:
     out: set[str] = set()
     if old is not None and new is not None and old == new:
         return out, "unchanged"
@@ -320,6 +320,10 @@ def _file_candidates(path: str, old: str | None, new: str | None, maps: Maps, is
         return out, "syntax error: importers"
     pairs = changed_pairs(old_code, new_code)
     changed = [o for o, _, _ in pairs]
+    if changed_objects is not None:
+        for o, _, _ in pairs:
+            kind = "module" if o is old_code else ("function" if o.co_flags & 0x01 else "class")
+            changed_objects.append((path, o.co_qualname, o.co_firstlineno, kind))
     if not changed:
         return out, "inert (code objects identical)"
     if path.startswith("tests/"):

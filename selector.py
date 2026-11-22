@@ -26,6 +26,11 @@ WORKER_COST_MS = 2000  # the scorer charges 2 s for every non-empty worker
 # verification starts after VERIFY_UNTIL seconds, and a running one is cut off at
 # VERIFY_HARD_STOP; the remaining commits list their candidates without running them.
 VERIFY_UNTIL = 100
+# Slow tests that cost less to run than to list, with their estimated scorer CPU (ms):
+# measured 1.0–1.44 s on quiet local runs in our child, times 1.5 for the scorer, plus margin.
+RUN_WHEN_CANDIDATE = {"tests/test_generator.py::TestGenerator::test_generator_memory": 2500}
+# Seconds allowed for computing one side of the TPC preparation comparison.
+TPC_TIMEOUT = 40
 # Seconds allowed for each side of a class-state comparison (import plus fingerprint).
 PROBE_TIMEOUT = 25
 # Patches larger than this are not read; the commit lists every test. Real patches
@@ -217,6 +222,80 @@ def narrow_class_edits(commit: str, changes, class_edits: list[dict], maps, veri
     return readers, f"class edits: {sum(len(v) for v in changed.values())} attributes changed in {len(changed)} classes -> {len(readers)} readers"
 
 
+def answer_cost(numbers: list[int], durations: dict[int, int]) -> int:
+    workers = pack(numbers, durations)
+    return (max(sum(durations[n] for n in w) for w in workers) + WORKER_COST_MS * len(workers)) if workers else 0
+
+
+_TPC_EXECUTION: set | None = None
+
+
+def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
+               class_edits: list, verifier, allowed: bool):
+    """Drop the TPC executor tests when what sqlglot prepares before execution is unchanged
+    (br/tpc.py). Only for patches that change function code alone, none of it run during
+    execution, and touch nothing else those tests depend on."""
+    global _TPC_EXECUTION
+    from br.tpc import REFUSE_PREFIXES, TPC_TESTS, same_as_pinned
+    from br.verify import build_tree, remove_tree
+
+    by_number = {t["number"]: t for t in tests}
+    present = {n: TPC_TESTS[by_number[n]["id"]] for n in chosen if by_number[n]["id"] in TPC_TESTS}
+    if not present or not allowed or not verifier.has_time():
+        return chosen, ""
+    paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
+    if class_edits or not changed_objects or any(not p.endswith(".py") or p.startswith(REFUSE_PREFIXES) for p in paths):
+        return chosen, " | tpc: kept (patch shape)"
+    if any(kind != "function" for _, _, _, kind in changed_objects):
+        return chosen, " | tpc: kept (class or module code changed)"
+    if _TPC_EXECUTION is None:
+        _TPC_EXECUTION = {(f[len("/src/"):], q, n) for f, q, n in json.loads((APP / "maps" / "tpc_exec.json").read_text())}
+    if any((p, q, n) in _TPC_EXECUTION for p, q, n, _ in changed_objects):
+        return chosen, " | tpc: kept (changed code runs during execution)"
+    tree = Path("/tmp/br") / (commit + "-tpc")
+    dropped = []
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    try:
+        remove_tree(tree)
+        build_tree(tree, changes)
+        for n, benchmark in sorted(present.items()):
+            if same_as_pinned(str(PINNED), str(tree), benchmark, TPC_TIMEOUT):
+                dropped.append(n)
+    except Exception as error:
+        return chosen, f" | tpc: kept (error {error!r})"
+    finally:
+        remove_tree(tree)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        log(f"{commit}: tpc comparison cpu {after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime:.2f}s")
+    names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in dropped)
+    if not dropped:
+        return chosen, " | tpc: kept (prepared queries differ)"
+    return [n for n in chosen if n not in dropped], f" | tpc: dropped [{names}] (prepared queries identical)"
+
+
+def run_cheap_heavy(commit: str, changes, chosen: list[int], tests: list[dict], verifier, allowed: bool):
+    """A slow test that is cheap to run (test_generator_memory: 6.7 s recorded, about 1.5 s
+    of scorer CPU in our child) is run when it is a candidate and leaving it out would
+    save more than running it costs; a pass drops it. Anything else stays listed."""
+    if not allowed or not verifier.has_time():
+        return chosen, ""
+    by_number = {t["number"]: t for t in tests}
+    durations = {t["number"]: duration_ms(t["seconds"]) for t in tests}
+    for test_id, run_cpu_ms in RUN_WHEN_CANDIDATE.items():
+        hit = [n for n in chosen if by_number[n]["id"] == test_id]
+        if not hit:
+            continue
+        rest = [n for n in chosen if n != hit[0]]
+        saving = answer_cost(chosen, durations) - answer_cost(rest, durations)
+        if saving <= run_cpu_ms:
+            continue
+        result = verifier(commit, changes, [by_number[hit[0]]])
+        if by_number[hit[0]]["id"] in result["passed"] and not result["failed"]:
+            return rest, f" | ran {test_id.rsplit('::', 1)[1]}: passed ({result['why'][:20]}), saved {saving / 1000:.1f}s"
+        return chosen, f" | ran {test_id.rsplit('::', 1)[1]}: not passed, listed"
+    return chosen, ""
+
+
 def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> tuple[list[int], str, list[int]]:
     """Test numbers to list for one patch, a one-line reason for the log, and the tests a
     wider (function- or importer-level) selection would have added, for free fill."""
@@ -234,7 +313,8 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
         changes = apply(text, read_pinned)
         class_edits: list[dict] = []
         wide: set[str] = set()
-        ids, reasons = candidates(changes, maps, lambda d: (PINNED / d).is_dir(), class_edits, wide)
+        changed_objects: list[tuple] = []
+        ids, reasons = candidates(changes, maps, lambda d: (PINNED / d).is_dir(), class_edits, wide, changed_objects)
     except (PatchError, Unbounded, UnicodeDecodeError) as error:
         return everything, f"all tests: {error!r}"[:300], []
     if class_edits:
@@ -254,6 +334,10 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     data_only = all(not (ch.old_path or ch.new_path or "").endswith(".py") for ch in changes)
     chosen, how = decide(cands, lambda regular: verifier(commit, changes, regular), can_verify, data_only)
     by_id = {t["id"]: t for t in tests}
+    chosen, how_run = run_cheap_heavy(commit, changes, chosen, tests, verifier, can_verify and not data_only)
+    how += how_run
+    chosen, how_tpc = decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier, can_verify)
+    how += how_tpc
     extras = sorted((by_id[i] for i in wide if i in by_id), key=lambda t: (t["seconds"], t["number"]))
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]
 
