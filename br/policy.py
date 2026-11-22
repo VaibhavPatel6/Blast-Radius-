@@ -21,13 +21,13 @@ Reasoning, from the scorer's arithmetic and measured costs:
 HEAVY_SECONDS = 3.0
 # Verify only when the estimated CPU of doing so is at most this many seconds: below the
 # 2-second fee of the one worker that listing would need, plus a little of the listed time.
-# Off (0): the warm path (br/warm.py) measured about even on the sample (EXPERIMENTS #16), and with a fresh
-# import per commit it measured break-even (EXPERIMENTS #7), so the cold path is not used.
+# 0 = off: with a fresh import per commit, verification measured break-even on the sample
+# (EXPERIMENTS #7: ~8 s simulated saved for ~8 s of scorer CPU). It returns with a warm parent.
 VERIFY_BUDGET = 0.0
 # Estimated scorer CPU: per recorded test second, per verification child, and the setUpClass
 # work of classes that build expensive fixtures (duckdb tables and a process pool; TPC data).
 CPU_PER_RECORDED_SECOND = 1.0
-CPU_PER_CHILD = 0.1  # fork of the warm zygote plus pytest's own start
+CPU_PER_CHILD = 0.3
 CLASS_SETUP_CPU = {
     # measured locally at ~8 s per verification under amd64 emulation (~2.7x the scorer)
     "tests/test_optimizer.py::TestOptimizer": 3.0,
