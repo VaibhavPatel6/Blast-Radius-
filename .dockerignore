@@ -6,3 +6,4 @@
 !br
 !selector.py
 br/__pycache__
+!tools/tpc_baseline.py

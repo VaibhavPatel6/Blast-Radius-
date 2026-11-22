@@ -16,6 +16,10 @@ RUN python /app/build/fetch_sqlglot.py /opt/sqlglot \
 COPY maps /app/maps
 COPY br /app/br
 COPY selector.py /app/selector.py
+# Digests of what sqlglot prepares for each TPC query at the pinned commit, made in a fresh
+# seeded interpreter (br/tpc.py); build time is not charged.
+COPY tools/tpc_baseline.py /app/tools/tpc_baseline.py
+RUN python /app/tools/tpc_baseline.py build /app/maps/tpc_pinned.json
 RUN python -m compileall -q /app && chmod -R a+rX /app /opt/sqlglot
 
 # SKIP_INTEGRATION=0 runs the executor tests, as in labeling. sqlglot's tests size

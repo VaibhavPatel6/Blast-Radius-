@@ -29,9 +29,6 @@ VERIFY_UNTIL = 100
 # Slow tests that cost less to run than to list, with their estimated scorer CPU (ms):
 # measured 1.0–1.44 s on quiet local runs in our child, times 1.5 for the scorer, plus margin.
 RUN_WHEN_CANDIDATE = {"tests/test_generator.py::TestGenerator::test_generator_memory": 2500}
-# The TPC comparison (br/tpc.py) is off until its reworked version is merged: on practice
-# it never fired (S4' = S3 to the millisecond), so leaving the tests listed costs nothing measured.
-TPC_CHECK = False
 # Seconds allowed for computing one side of the TPC preparation comparison.
 TPC_TIMEOUT = 40
 # Seconds allowed for each side of a class-state comparison (import plus fingerprint).
@@ -296,68 +293,20 @@ _TPC_QUERIES: dict | None = None
 IMPORT_LIKE_ENTRANTS = 1500
 
 
-def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
-               class_edits: list, verifier, allowed: bool, maps=None):
-    """Drop the TPC executor tests when what sqlglot prepares before execution is unchanged
-    (br/tpc.py). Only for patches that change function code alone, none of it run during
-    execution, and touch nothing else those tests depend on."""
-    if not TPC_CHECK:
+def decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier, allowed, maps=None):
+    """Drop the TPC executor tests when what they depend on provably did not change
+    (br/tpc.py: prepared queries, import state, fixtures), when that is expected to pay."""
+    if not allowed or not verifier.has_time():
         return chosen, ""
-    global _TPC_EXECUTION
-    from br.tpc import REFUSE_PREFIXES, TPC_TESTS, same_as_pinned
-    from br.verify import build_tree, remove_tree
+    from br.tpc import decide
 
-    by_number = {t["number"]: t for t in tests}
-    present = {n: TPC_TESTS[by_number[n]["id"]] for n in chosen if by_number[n]["id"] in TPC_TESTS}
-    if not present or not allowed or not verifier.has_time():
-        return chosen, ""
-    paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
-    if class_edits or not changed_objects or any(not p.endswith(".py") or p.startswith(REFUSE_PREFIXES) for p in paths):
-        return chosen, " | tpc: kept (patch shape)"
-    if any(kind != "function" for _, _, _, kind in changed_objects):
-        return chosen, " | tpc: kept (class or module code changed)"
-    if _TPC_EXECUTION is None:
-        _TPC_EXECUTION = {(f[len("/src/"):], q, n) for f, q, n in json.loads((APP / "maps" / "tpc_exec.json").read_text())}
-    if any((p, q, n) in _TPC_EXECUTION for p, q, n, _ in changed_objects):
-        return chosen, " | tpc: kept (changed code runs during execution)"
-    # Code that runs at import (metaclasses, factories called in class bodies) can change
-    # the tables the executor reads without changing any prepared query: refuse it.
-    global _IMPORT_TIME
-    if _IMPORT_TIME is None:
-        _IMPORT_TIME = {tuple(x) for x in json.loads((APP / "maps" / "import_time.json").read_text())}
-    if any((p, q, n) in _IMPORT_TIME for p, q, n, _ in changed_objects):
-        return chosen, " | tpc: kept (changed code runs at import)"
-    if maps is None or any(len(maps.entered(p, q, n)) > IMPORT_LIKE_ENTRANTS for p, q, n, _ in changed_objects):
-        return chosen, " | tpc: kept (changed code entered by nearly every test)"
-    # Every query is prepared on both sides, in the order the test uses. (A per-query
-    # shortcut is being rebuilt on its own branch; when no query's recorded preparation
-    # reaches the change, the change is unexplained and the test stays listed.)
-    global _TPC_QUERIES
-    if _TPC_QUERIES is None:
-        _TPC_QUERIES = json.loads((APP / "maps" / "tpc_queries.json").read_text())
-    keys = [f"{p}|{q}|{n}" for p, q, n, _ in changed_objects]
-    for b in set(present.values()):
-        if not any(k in _TPC_QUERIES.get(b, {}) for k in keys):
-            return chosen, " | tpc: kept (no query's preparation reaches the change: unexplained)"
-    tree = Path("/tmp/br") / (commit + "-tpc")
-    dropped = []
-    before = resource.getrusage(resource.RUSAGE_CHILDREN)
-    try:
-        remove_tree(tree)
-        build_tree(tree, changes)
-        for n, benchmark in sorted(present.items()):
-            if same_as_pinned(str(PINNED), str(tree), benchmark, TPC_TIMEOUT):
-                dropped.append(n)
-    except Exception as error:
-        return chosen, f" | tpc: kept (error {error!r})"
-    finally:
-        remove_tree(tree)
-        after = resource.getrusage(resource.RUSAGE_CHILDREN)
-        log(f"{commit}: tpc comparison cpu {after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime:.2f}s")
-    names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in dropped)
-    if not dropped:
-        return chosen, " | tpc: kept (prepared queries differ)"
-    return [n for n in chosen if n not in dropped], f" | tpc: dropped [{names}] (prepared queries identical)"
+    durations = {t["number"]: duration_ms(t["seconds"]) for t in tests}
+
+    def saving_ms(drop):
+        return answer_cost(chosen, durations) - answer_cost([n for n in chosen if n not in drop], durations)
+
+    return decide(commit, changes, chosen, tests, changed_objects, class_edits, str(PINNED),
+                  TPC_TIMEOUT, log, saving_ms=saving_ms)
 
 
 def run_cheap_heavy(commit: str, changes, chosen: list[int], tests: list[dict], verifier, allowed: bool):
@@ -430,6 +379,16 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
             return everything, f"all tests: patch is {size} bytes", []
         text = patch_path.read_bytes().decode("utf-8")
         changes = apply(text, read_pinned)
+        # A patch that only swaps `is`/`==` (or `is not`/`!=`) at comparison sites where
+        # every operand pair the pinned suite produced compares by identity cannot change
+        # any test (br/swap.py); only tests that read the file as data stay listed.
+        from br.swap import prove
+
+        proven, why_swap, keep = prove(changes, maps)
+        if proven:
+            keep_numbers = [t["number"] for t in tests if t["id"] in keep]
+            unmapped = [t["number"] for t in tests if t["id"] not in known]
+            return sorted(set(keep_numbers) | set(unmapped)), f"swap proof: {why_swap}"[:400], []
         class_edits: list[dict] = []
         wide: set[str] = set()
         changed_objects: list[tuple] = []
