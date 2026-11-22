@@ -324,18 +324,16 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
         return chosen, " | tpc: kept (changed code runs at import)"
     if maps is None or any(len(maps.entered(p, q, n)) > IMPORT_LIKE_ENTRANTS for p, q, n, _ in changed_objects):
         return chosen, " | tpc: kept (changed code entered by nearly every test)"
+    # Every query is prepared on both sides, in the order the test uses. (A per-query
+    # shortcut is being rebuilt on its own branch; when no query's recorded preparation
+    # reaches the change, the change is unexplained and the test stays listed.)
     global _TPC_QUERIES
     if _TPC_QUERIES is None:
         _TPC_QUERIES = json.loads((APP / "maps" / "tpc_queries.json").read_text())
     keys = [f"{p}|{q}|{n}" for p, q, n, _ in changed_objects]
-    affected = {b: frozenset(i for k in keys for i in _TPC_QUERIES.get(b, {}).get(k, [])) for b in set(present.values())}
-    free = [n for n, b in present.items() if not affected[b]]
-    if free:  # no query reaches the changed code while being prepared
-        names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in free)
-        chosen = [n for n in chosen if n not in free]
-        present = {n: b for n, b in present.items() if n not in free}
-        if not present:
-            return chosen, f" | tpc: dropped [{names}] (no query reaches the change)"
+    for b in set(present.values()):
+        if not any(k in _TPC_QUERIES.get(b, {}) for k in keys):
+            return chosen, " | tpc: kept (no query's preparation reaches the change: unexplained)"
     tree = Path("/tmp/br") / (commit + "-tpc")
     dropped = []
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -343,7 +341,7 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
         remove_tree(tree)
         build_tree(tree, changes)
         for n, benchmark in sorted(present.items()):
-            if same_as_pinned(str(PINNED), str(tree), benchmark, TPC_TIMEOUT, affected[benchmark]):
+            if same_as_pinned(str(PINNED), str(tree), benchmark, TPC_TIMEOUT):
                 dropped.append(n)
     except Exception as error:
         return chosen, f" | tpc: kept (error {error!r})"

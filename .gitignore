@@ -15,3 +15,6 @@ blast-radius-sample.tar.gz
 __pycache__/
 *.pyc
 .DS_Store
+
+# Other build sessions' git worktrees
+.claude/worktrees/
