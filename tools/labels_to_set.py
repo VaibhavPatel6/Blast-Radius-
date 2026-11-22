@@ -14,12 +14,15 @@ from pathlib import Path
 labels = json.loads(Path(sys.argv[1]).read_text())
 patches = Path(sys.argv[2])
 out = Path(sys.argv[3])
-kinds = json.loads(Path(sys.argv[4]).read_text()) if len(sys.argv) > 4 else {}
+rest = [a for a in sys.argv[4:] if not a.startswith("--")]
+kinds = json.loads(Path(rest[0]).read_text()) if rest else {}
 (out / "commits").mkdir(parents=True, exist_ok=True)
 answers = {}
 for cid, v in labels.items():
     src = patches / f"{cid}.patch"
-    if v.get("error") or v.get("focused") or not src.exists():
+    # Focused labels (pytest on the importers only) are complete when the importers include
+    # every test the patch can break, as for class-level edits; pass --focused-ok for those.
+    if v.get("error") or (v.get("focused") and "--focused-ok" not in sys.argv) or not src.exists():
         continue
     shutil.copy(src, out / "commits" / src.name)
     answers[cid] = {"failing": v["failing"], "kind": kinds.get(cid, {}).get("kind", "corpus")}

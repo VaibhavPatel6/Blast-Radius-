@@ -66,6 +66,23 @@ def function_lines(text: str, rel: str) -> set[int]:
     return {line for line, code in owner.items() if code.co_flags & 0x01}
 
 
+def class_body_lines(text: str, rel: str) -> set[int]:
+    """Lines whose innermost code object is a class body (not a function, not the module)."""
+    import types
+    owner = {}
+
+    def walk(code):
+        for _, _, line in code.co_lines():
+            if line is not None:
+                owner[line] = code
+        for c in code.co_consts:
+            if isinstance(c, types.CodeType):
+                walk(c)
+    top = compile(text, rel, "exec")
+    walk(top)
+    return {line for line, code in owner.items() if code is not top and not (code.co_flags & 0x01)}
+
+
 def make_patch(rel: str, old: str, new: str) -> str:
     diff = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
                                 f"a/{rel}", f"b/{rel}", n=3)
@@ -82,6 +99,7 @@ def main():
     ap.add_argument("--maps", type=Path, default=ROOT / "maps")
     ap.add_argument("--prefix", default="m")
     ap.add_argument("--functions-only", action="store_true", help="only lines inside function bodies")
+    ap.add_argument("--class-only", action="store_true", help="only lines inside class bodies (not in methods)")
     args = ap.parse_args()
     rng = random.Random(args.seed)
     files = sorted({p for g in args.files for p in PRISTINE.glob(g) if p.is_file()})
@@ -116,6 +134,9 @@ def main():
         if args.functions_only:
             in_function = function_lines(text, rel)
             cands = [c for c in cands if c[0] in in_function]
+        if args.class_only:
+            in_class = class_body_lines(text, rel)
+            cands = [c for c in cands if c[0] in in_class]
         if not cands:
             continue
         line, a, b, rep = rng.choice(cands)

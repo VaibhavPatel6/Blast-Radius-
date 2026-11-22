@@ -25,9 +25,9 @@ WORKER_COST_MS = 2000  # the scorer charges 2 s for every non-empty worker
 # The run gets 3 minutes (4.5 in the final, for 1.5 times as many commits). No new
 # verification starts after VERIFY_UNTIL seconds, and a running one is cut off at
 # VERIFY_HARD_STOP; the remaining commits list their candidates without running them.
-VERIFY_UNTIL = 90
+VERIFY_UNTIL = 100
 # Seconds allowed for each side of a class-state comparison (import plus fingerprint).
-PROBE_TIMEOUT = 30
+PROBE_TIMEOUT = 25
 # Patches larger than this are not read; the commit lists every test. Real patches
 # are a few kilobytes, and parsing many megabytes could exhaust memory or time.
 MAX_PATCH_BYTES = 2_000_000
@@ -189,10 +189,13 @@ def narrow_class_edits(commit: str, changes, class_edits: list[dict], maps, veri
         return importers, "class edits: importers (no read records for the edited file)"
     modules = sorted({e["path"][:-3].replace("/", ".").removesuffix(".__init__") for e in class_edits})
     tree = Path("/tmp/br") / (commit + "-state")
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
         remove_tree(tree)
         build_tree(tree, changes)
         changed = changed_attributes(str(PINNED), str(tree), modules, PROBE_TIMEOUT)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        log(f"{commit}: class-state probe cpu {after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime:.2f}s")
     except Exception as error:
         return importers, f"class edits: importers (probe error {error!r})"
     finally:

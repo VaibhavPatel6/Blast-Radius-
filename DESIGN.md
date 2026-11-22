@@ -119,10 +119,71 @@ For each changed file:
   files, a changed pytest section in `setup.cfg` or `pyproject.toml`,
   `sitecustomize.py`, `.pth` files): the change cannot be bounded, so every test is listed.
 
+**Statement-level narrowing.** For a changed function, the candidates are not all tests
+that entered it but only those that executed a line of the statement the patch touched
+(the whole statement, so the continuation lines of a multi-line condition count). This
+is only allowed when the function's shape is unchanged: the same flags (a `yield`
+anywhere makes it a generator), the same local, free and cell variable names (a new
+assignment anywhere makes a name local for the whole function), and the same nested
+functions. If any touched line was executed by no test run alone, it falls back to
+every test that entered the function: such a line may run only after another test has
+changed shared state (we measured 14 such lines, e.g. the dialect re-registration loop
+that runs after `test_dialect_entry_points` clears the registry).
+
+**Test files.** An edit in `tests/` outside an ordinary test method or helper (module or
+class level code, `setUp`, `setUpClass`, `tearDown`...) can leave state behind for other
+tests in the same pytest process, so every test is listed.
+
 A test that the maps do not know (a different `tests.json`) is always listed. If the
 maps name a code object that this interpreter does not produce when it compiles the
 pinned file, the maps and the image disagree and that commit lists every test (a
 lookup must never come back empty just because a name changed).
+
+## Class-level edits (`br/state.py`, `narrow_class_edits` in `selector.py`)
+
+When a patch changes only values inside a class body (a constant, a dict entry, a flag),
+the candidates would be every test that imported the module. Instead, two fresh forked
+processes import the same modules, one from the pinned tree and one from the patched
+view, after `pytest` (sqlglot checks at import whether a test framework is loaded). Each
+computes a structural fingerprint of every attribute of every loaded sqlglot class, after
+all class-creation hooks (metaclasses, `__init_subclass__`) have run. The differences
+name exactly which attributes changed, including attributes those hooks derive from
+others (a keyword trie from `KEYWORDS`, `required_args` from `arg_types`). The candidates
+are then the tests that read one of those attributes, from a map recorded by running
+every test alone with each class attribute replaced by a stand-in that notes its first
+read (`COVMAP_CLASSES=1` in `tools/covmap/recorder.py`).
+
+Falls back to every importer when: a class or attribute exists on one side only; the
+class is an enum, dataclass or named tuple; a changed attribute is one the read recorder
+does not wrap (special `__names__` such as `__init__`, whose defaults live in the class
+body; properties and other data descriptors), so its readers are unknown; an import
+fails or times out; the maps hold no read records for the file. A value the fingerprint
+cannot read counts as changed.
+
+Fingerprints compare values, not identities: functions by their code (ignoring line
+numbers), defaults and closure contents; bound methods also by the object they are bound
+to (`exp.A.from_arg_list` differs from `exp.B.from_arg_list`). Tables keyed by strings,
+numbers or enum members are compared in order, since sqlglot iterates some of them in
+order. Tables keyed by classes are compared by content only: they are often built by
+iterating sets of classes, whose order follows memory addresses and differs between two
+imports. Both sides are forked from the same process, so they share a hash seed; a no-op
+comparison of typical modules reports no differences.
+
+## Free fill (`free_fill` in `selector.py`)
+
+The scorer charges the busiest worker plus 2 s per worker, so a test that fits under the
+busiest worker's load on another worker costs nothing. After packing, we add such tests:
+first the ones a wider selection would have listed (function-level or importer-level),
+then the 94 tests recorded at 0 ms. This never changes the cost and may cover a failing
+test our narrowing missed.
+
+## Verification (`br/verify.py`, `br/policy.py`) — built, currently off
+
+A forked child runs candidate tests with real pytest on the patched view and stops at the
+first failure; only tests seen to pass are dropped. Measured on the sample with a fresh
+sqlglot import per commit, it saved about as many simulated seconds as it cost in CPU, so
+it is switched off (`VERIFY_BUDGET = 0`) until children can start from an already-warm
+process.
 
 ## Development tools (`tools/`, never part of the image)
 

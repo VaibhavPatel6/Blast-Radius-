@@ -38,9 +38,33 @@ def _code_hex(code: types.CodeType) -> str:
     return digest
 
 
+_PLAIN_KEYS = (str, int, bool, float, bytes, type(None))
+# Attributes that are caches of the import machinery, not program state: the abc module's
+# per-class registry cache (a C object that cannot be compared across processes).
+_SKIPPED_NAMES = {"__dict__", "__weakref__", "__doc__", "__module__", "__firstlineno__",
+                  "__static_attributes__", "_abc_impl"}
+
+
+def instrumented(name: str, value) -> bool:
+    """Whether the attribute-read recorder (tools/covmap/recorder.py) wraps this attribute,
+    so that the maps can name its readers. Must mirror `_instrument` there."""
+    if name.startswith("__") and name.endswith("__"):
+        return False
+    if hasattr(type(value), "__set__") or isinstance(value, (types.MemberDescriptorType,
+                                                            types.GetSetDescriptorType)):
+        return False
+    return True
+
+
 class _Digest:
     def __init__(self, limit: int = 200_000):
         self.limit = limit  # nodes visited per attribute; beyond it the value is "unknown"
+        # Within one pass nothing changes, so a shared object (a function reused by many
+        # subclass tables, a trie) is digested once. `keep` holds the objects so their
+        # ids cannot be reused by new objects during the pass.
+        self.memo: dict[int, str] = {}
+        self.keep: list = []
+        self.cycles = 0  # cycle markers emitted so far; a value that met one is not memoised
 
     def __call__(self, value) -> str:
         h = hashlib.sha256()
@@ -50,6 +74,12 @@ class _Digest:
             self._walk(value, h)
         except (_TooBig, RecursionError):
             return "unknown:" + str(id(value))  # never equal across imports
+        return h.hexdigest()
+
+    def _sub(self, v) -> str:
+        """Digest of a nested value (a set element or dict key), sharing this pass's memo."""
+        h = hashlib.sha256()
+        self._walk(v, h)
         return h.hexdigest()
 
     def _walk(self, v, h) -> None:
@@ -71,8 +101,15 @@ class _Digest:
             return
         key = id(v)
         if key in self.stack:
+            self.cycles += 1
             h.update(b"cycle;")
             return
+        memo = self.memo.get(key)
+        if memo is not None:
+            h.update(memo.encode())
+            return
+        outer, h = h, hashlib.sha256()
+        cycles_before = self.cycles
         self.stack.add(key)
         try:
             if t in (list, tuple):
@@ -81,14 +118,27 @@ class _Digest:
                     self._walk(x, h)
                 h.update(b")")
             elif t in (set, frozenset):
-                parts = sorted(self.__class__(self.limit)(x) for x in v)
+                parts = sorted(self._sub(x) for x in v)
                 h.update(f"{t.__name__}{{{','.join(parts)}}};".encode())
-            elif isinstance(v, dict):
-                items = sorted(((self.__class__(self.limit)(k), k, x) for k, x in v.items()), key=lambda p: p[0])
-                h.update(f"{type(v).__name__}{{".encode())
-                for dk, _, x in items:
-                    h.update(dk.encode() + b":")
-                    self._walk(x, h)
+            elif isinstance(v, (dict, types.MappingProxyType)):
+                if all(type(k) in _PLAIN_KEYS or isinstance(k, enum.Enum) for k in v):
+                    # Keys whose order does not depend on memory addresses: insertion order
+                    # counts (sqlglot iterates some tables in order). Both sides are forked
+                    # from one process, so they share a hash seed.
+                    h.update(f"odict{{".encode())
+                    for k, x in list(v.items()):
+                        self._walk(k, h)
+                        h.update(b":")
+                        self._walk(x, h)
+                else:
+                    # Keyed by classes or other objects: such tables are often built by
+                    # iterating sets of classes, in an order that follows memory addresses
+                    # and differs between two imports; compare their content only.
+                    items = sorted(((self._sub(k), x) for k, x in v.items()), key=lambda p: p[0])
+                    h.update(b"udict{")
+                    for dk, x in items:
+                        h.update(dk.encode() + b":")
+                        self._walk(x, h)
                 h.update(b"}")
             elif isinstance(v, types.FunctionType):
                 h.update(b"function(" + _code_hex(v.__code__).encode())
@@ -102,6 +152,7 @@ class _Digest:
                 h.update(b")")
             elif isinstance(v, (types.MethodType,)):
                 h.update(b"method(")
+                self._walk(v.__self__, h)  # exp.A.from_arg_list and exp.B.from_arg_list differ
                 self._walk(v.__func__, h)
                 h.update(b")")
             elif isinstance(v, (staticmethod, classmethod)):
@@ -117,6 +168,10 @@ class _Digest:
                                 types.MethodDescriptorType, types.MemberDescriptorType,
                                 types.GetSetDescriptorType)):
                 h.update(f"builtin:{getattr(v, '__qualname__', repr(v))};".encode())
+            elif t.__module__ in ("typing", "typing_extensions") or isinstance(v, (types.GenericAlias, types.UnionType)):
+                h.update(f"typing:{v!r};".encode())  # annotations: their printed form is stable
+            elif t.__name__ == "_tuplegetter":
+                h.update(f"tuplegetter:{v.__reduce__()[1]!r};".encode())
             elif t.__name__ == "Pattern" and hasattr(v, "pattern"):
                 h.update(f"re:{v.pattern!r}:{v.flags};".encode())
             elif hasattr(v, "__dict__") or hasattr(type(v), "__slots__"):
@@ -139,6 +194,11 @@ class _Digest:
                 raise _TooBig  # unknown kind of value: never equal
         finally:
             self.stack.discard(key)
+        digest = "m" + h.hexdigest()
+        if self.cycles == cycles_before:  # its digest does not depend on where we came from
+            self.memo[key] = digest
+            self.keep.append(v)
+        outer.update(digest.encode())
 
 
 class _TooBig(Exception):
@@ -185,10 +245,11 @@ def fingerprint_modules(prefix: str = "sqlglot", only: set[str] | None = None) -
         for qual, cls in _classes(module):
             attrs = {"__kind__": _kind(cls)}
             for name, value in list(vars(cls).items()):
-                if name in ("__dict__", "__weakref__", "__doc__", "__module__", "__firstlineno__",
-                            "__static_attributes__"):
+                if name in _SKIPPED_NAMES:
                     continue
-                attrs[name] = digest(value)
+                # "N:" marks attributes the read recorder never wraps: a change there
+                # cannot be followed to its readers.
+                attrs[name] = ("" if instrumented(name, value) and _kind(cls) == "class" else "N:") + digest(value)
             out[f"{mod_name}:{qual}"] = attrs
     return out
 
@@ -313,11 +374,10 @@ def changed_attributes(pinned_tree: str, patched_tree: str, modules: list[str], 
             u, v = x.get(name), y.get(name)
             if u is None or v is None:
                 changed.add("*")
-            elif u.startswith("unknown:") or v.startswith("unknown:"):
-                if module in patched:
-                    changed.add(name)
-            elif u != v:
-                changed.add(name)
+            elif u != v or "unknown:" in u or "unknown:" in v:
+                # a value we cannot fingerprint counts as changed: harmless when no test
+                # reads it, sound when one does
+                changed.add("*" if u.startswith("N:") or v.startswith("N:") else name)
         if changed and (x.get("__kind__") != "class" or y.get("__kind__") != "class"):
             changed.add("*")  # enum, dataclass or named-tuple members: never narrowed
         if changed:
