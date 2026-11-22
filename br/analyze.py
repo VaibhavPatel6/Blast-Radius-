@@ -155,7 +155,25 @@ def _pytest_config_changed(name: str, old: str | None, new: str | None) -> bool:
         return True
 
 
-def candidates(changes, maps: Maps) -> tuple[set[str], list[str]]:
+def _all_keys(code: types.CodeType, out: set) -> set:
+    out.add(f"{code.co_qualname}@{code.co_firstlineno}")
+    for c in _children(code):
+        _all_keys(c, out)
+    return out
+
+
+def _listing_dir(path: str, is_dir) -> str:
+    """The directory whose listing would reveal a new file at `path`: its parent if that
+    exists in the pinned tree, else the nearest ancestor that does (a new folder is
+    noticed by whoever lists the folder it was created in)."""
+    directory = path.rsplit("/", 1)[0] if "/" in path else ""
+    while directory and not is_dir(directory):
+        directory = directory.rsplit("/", 1)[0] if "/" in directory else ""
+    return directory
+
+
+def candidates(changes, maps: Maps, is_dir) -> tuple[set[str], list[str]]:
+    """is_dir(relative path) says whether a directory exists in the pinned tree."""
     found: set[str] = set()
     reasons: list[str] = []
     for ch in changes:
@@ -185,27 +203,35 @@ def candidates(changes, maps: Maps) -> tuple[set[str], list[str]]:
         else:
             parts = [(ch.old_path or ch.new_path, ch.old_text, ch.new_text)]
         for path, old, new in parts:
-            got, why = _file_candidates(path, old, new, maps)
+            got, why = _file_candidates(path, old, new, maps, is_dir)
             found |= got
             reasons.append(f"{path}: {why} -> {len(got)}")
     return found, reasons
 
 
-def _file_candidates(path: str, old: str | None, new: str | None, maps: Maps) -> tuple[set[str], str]:
+def _file_candidates(path: str, old: str | None, new: str | None, maps: Maps, is_dir) -> tuple[set[str], str]:
     out: set[str] = set()
     if old is not None and new is not None and old == new:
         return out, "unchanged"
     # readers of the file as data, whatever its type
     out |= maps.opened(path)
-    directory = path.rsplit("/", 1)[0] if "/" in path else ""
+    directory = _listing_dir(path, is_dir)
     if old is None:  # added: whoever listed the directory could see it
         out |= maps.listed(directory)
         return out, "added file: directory listers"
     if not path.endswith(".py"):
+        if new is None:  # deleted: its readers, and whoever listed its directory
+            out |= maps.listed(directory)
+            return out, "deleted data file: readers and directory listers"
         return out, "data file: readers"
     old_code = _compile(old, path)
     if old_code is None:
         raise Unbounded(f"{path}: pinned file does not compile")
+    # The maps name code objects as compiled when they were built. If this interpreter
+    # compiles the pinned file differently, a lookup could silently find nothing.
+    unknown = maps.code_keys(path) - _all_keys(old_code, set())
+    if unknown:
+        raise Unbounded(f"{path}: maps and this interpreter disagree on {len(unknown)} code objects")
     module_key = (old_code.co_qualname, old_code.co_firstlineno)
     if new is None:
         out |= maps.entered(path, *module_key) | maps.listed(directory)

@@ -23,8 +23,14 @@ PREFIX = "/src/"
 
 
 def main() -> int:
-    out = Path(sys.argv[1])
-    seeds = [Path(p) for p in sys.argv[2:]]
+    args = sys.argv[1:]
+    extras = []
+    while "--extra" in args:  # JSON {test id: [[file, qualname, firstlineno], ...]} to add
+        i = args.index("--extra")
+        extras.append(Path(args[i + 1]))
+        del args[i:i + 2]
+    out = Path(args[0])
+    seeds = [Path(p) for p in args[1:]]
     records: dict[str, dict] = {}
     for seed in seeds:
         for p in seed.glob("*.json"):
@@ -45,6 +51,9 @@ def main() -> int:
             r["cpu"] = max(r["cpu"], d["cpu"] + d["cpu_children"])
             r["ok"] = r["ok"] and d["ok"]
             r["children"] = max(r["children"], d.get("children", 0))
+    for extra in extras:
+        for tid, codes in json.loads(extra.read_text()).items():
+            records[tid]["code"].update(tuple(c) for c in codes)
     ids = sorted(records)
     index = {tid: i for i, tid in enumerate(ids)}
     set_ids: dict[tuple, int] = {}

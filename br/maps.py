@@ -37,6 +37,10 @@ class Maps:
         e = self._file(path)
         return self._ids(e["code"].get(f"{qualname}@{firstlineno}")) if e else set()
 
+    def code_keys(self, path: str) -> set[str]:
+        e = self._file(path)
+        return set(e["code"]) if e else set()
+
     def lines(self, path: str, line: int) -> set[str]:
         e = self._file(path)
         return self._ids(e["lines"].get(str(line))) if e else set()

@@ -40,7 +40,7 @@ def main():
             text = (set_dir / "commits" / f"{cid}.patch").read_bytes().decode("utf-8", "replace")
             failing = {by_number[n]["id"] for n in ans["failing"]}
             try:
-                cands, reasons = candidates(apply(text, read), maps)
+                cands, reasons = candidates(apply(text, read), maps, lambda d: (PRISTINE / d).is_dir())
                 cands |= unmapped
                 rung = "cand"
             except (PatchError, Unbounded) as e:

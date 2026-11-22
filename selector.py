@@ -150,7 +150,7 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
             return everything, f"all tests: patch is {size} bytes"
         text = patch_path.read_bytes().decode("utf-8")
         changes = apply(text, read_pinned)
-        ids, reasons = candidates(changes, maps)
+        ids, reasons = candidates(changes, maps, lambda d: (PINNED / d).is_dir())
     except (PatchError, Unbounded, UnicodeDecodeError) as error:
         return everything, f"all tests: {error!r}"[:300]
     # a test our maps never saw could depend on anything: always list it

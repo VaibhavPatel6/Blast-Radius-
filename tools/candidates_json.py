@@ -27,7 +27,7 @@ maps = Maps(Path(sys.argv[1]))
 out = {}
 for patch in sorted((Path(sys.argv[2]) / "commits").glob("*.patch")):
     try:
-        ids, _ = candidates(apply(patch.read_bytes().decode("utf-8"), read), maps)
+        ids, _ = candidates(apply(patch.read_bytes().decode("utf-8"), read), maps, lambda d: (PRISTINE / d).is_dir())
         out[patch.stem] = sorted(ids)
     except (PatchError, Unbounded, UnicodeDecodeError):
         out[patch.stem] = "ALL"

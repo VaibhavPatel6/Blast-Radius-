@@ -83,6 +83,13 @@ process pools; one dialect test runs `python -c`) are covered too: a
 `sitecustomize.py` on the path turns recording on in any Python process started
 during mapping, and its record is merged into the test's.
 
+**Shared processes.** The organizers ran many tests per pytest process. To check that
+one-test-per-process maps miss nothing that matters, `tools/covmap/suite_plugin.py`
+records coverage per test during a normal pytest run of the whole suite (re-arming
+`sys.monitoring` at each test's start with `restart_events()`). Sequentially and under
+pytest-xdist alike, only 3 tests entered code they never enter alone, all because
+pytest formats subtest parameters with `repr()`; those entries are added to the maps.
+
 ## Patch analysis (`br/analyze.py`)
 
 For each changed file:
@@ -99,7 +106,9 @@ For each changed file:
   print in different orders), and the one constant where Python 3.13 stores a class's
   own line number (`__firstlineno__`) is ignored when nothing else uses it.
 - **Other files** (fixtures, data): the tests that opened that file.
-- **Added files**: the tests that listed that directory.
+- **Added files**: the tests that listed that directory (or, for a file in a new
+  folder, the nearest folder that exists). **Deleted data files**: their readers and
+  the directory's listers.
 - **A new file or folder at the repository root**: the root is on Python's import
   path ahead of the installed packages and is scanned for package metadata, so a new
   `something.py` there can shadow any import. Every test is listed.
@@ -110,7 +119,10 @@ For each changed file:
   files, a changed pytest section in `setup.cfg` or `pyproject.toml`,
   `sitecustomize.py`, `.pth` files): the change cannot be bounded, so every test is listed.
 
-A test that the maps do not know (a different `tests.json`) is always listed.
+A test that the maps do not know (a different `tests.json`) is always listed. If the
+maps name a code object that this interpreter does not produce when it compiles the
+pinned file, the maps and the image disagree and that commit lists every test (a
+lookup must never come back empty just because a name changed).
 
 ## Development tools (`tools/`, never part of the image)
 
