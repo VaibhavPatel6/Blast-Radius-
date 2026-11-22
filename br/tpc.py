@@ -76,6 +76,10 @@ _LOCK_TYPES = (type(__import__("threading").RLock()), type(__import__("threading
 # pinned tree (no test can depend on it): compared as sets.
 _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 
+# Class-body and module-level edits are judged too (attribute by attribute, against the
+# execution-read record maps/tpc_reads.json). False refuses them as before.
+CLASS_LEVEL = True
+
 _APP = Path(__file__).resolve().parent.parent
 _PINNED: dict[str, dict] = {}
 _MAPS: dict[str, object] = {}
@@ -145,7 +149,7 @@ def code_renames(changes) -> dict[str, str] | None:
     return renames
 
 
-def _state(renames: dict[str, str]) -> dict[str, str]:
+def _state(renames: dict[str, str]) -> dict:
     """{"module" or "module:Class": digest} for every loaded sqlglot module: its globals and
     each of its classes' attributes, digested structurally as in br/state.py. A function is
     digested by its file, qualified name, code, defaults and closure, its code digest passed
@@ -196,27 +200,49 @@ def _state(renames: dict[str, str]) -> dict[str, str]:
                 return
             super()._walk(v, h)
 
+    def function_of(value):
+        """"path|qualname|firstlineno" when the value is a function (also wrapped in
+        staticmethod or classmethod), else None."""
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if not isinstance(value, types.FunctionType):
+            return None
+        code = value.__code__
+        path = code.co_filename[len(root):] if code.co_filename.startswith(root) else code.co_filename
+        return f"{path}|{code.co_qualname}|{code.co_firstlineno}"
+
     digest = StateDigest()
     out: dict[str, str] = {}
+    detail: dict[str, dict[str, str]] = {}
+    functions: dict[str, dict[str, str]] = {}
     for mod_name, module in sorted(list(sys.modules.items())):
         if module is None or not (mod_name == "sqlglot" or mod_name.startswith("sqlglot.")):
             continue
         h = hashlib.sha256()
+        names = detail[mod_name] = {}
         for name, value in sorted(list(vars(module).items()), key=lambda p: p[0]):
             if name in _SKIPPED_GLOBALS:
                 continue
             if (mod_name, name) in _UNORDERED_GLOBALS and type(value) is tuple:
                 value = frozenset(value)
-            h.update(name.encode() + b"=" + digest(value).encode() + b";")
+            d = names[name] = digest(value)[:16]
+            h.update(name.encode() + b"=" + d.encode() + b";")
+            if (f := function_of(value)) is not None:
+                functions.setdefault(mod_name, {})[name] = f
         out[mod_name] = h.hexdigest()[:24]
         for qual, cls in state._classes(module):
-            h = hashlib.sha256(state._kind(cls).encode())
+            kind = state._kind(cls)
+            h = hashlib.sha256(kind.encode())
+            names = detail[f"{mod_name}:{qual}"] = {"__kind__": kind}
             for name, value in sorted(list(vars(cls).items()), key=lambda p: p[0]):
                 if name in state._SKIPPED_NAMES:
                     continue
-                h.update(name.encode() + b"=" + digest(value).encode() + b";")
+                d = names[name] = digest(value)[:16]
+                h.update(name.encode() + b"=" + d.encode() + b";")
+                if (f := function_of(value)) is not None:
+                    functions.setdefault(f"{mod_name}:{qual}", {})[name] = f
             out[f"{mod_name}:{qual}"] = h.hexdigest()[:24]
-    return out
+    return {"summary": out, "detail": detail, "functions": functions}
 
 
 def _tree(root, expression_type) -> str:
@@ -358,7 +384,7 @@ def _artifacts(benchmark: str, only, renames: dict, with_state: bool, expected=N
             snapshot = None
             if state is None:
                 raise RuntimeError("state digest failed")
-            row["state"] = state
+            row["state"], row["detail"], row["functions"] = state["summary"], state["detail"], state["functions"]
         emit(row)
         return out
     finally:
@@ -425,8 +451,8 @@ def _matches(row: dict, pinned: dict) -> bool:
     skipped = set()
     if row["step"] == "run" and "optimized" not in row:
         skipped = {"optimized", "sql"}
-    if row["step"] == "import" and "state" not in row:
-        skipped = {"state"}
+    if row["step"] == "import":
+        skipped = {"state", "detail", "functions"} if "state" not in row else {"detail", "functions"}
     return all(row.get(k) == pinned.get(k) for k in set(pinned) - skipped)
 
 
@@ -521,10 +547,73 @@ def pinned_rows(pinned_tree: str, benchmark: str, timeout: float):
     return _PINNED[benchmark]
 
 
+def _reads():
+    """maps/tpc_reads.json (tools/covmap/tpc_reads.py): the class attributes the pinned
+    commit's TPC tests read during their execution parts, and those the recorder could see
+    at all. None without the map."""
+    if "tpc_reads.json" not in _MAPS:
+        try:
+            data = json.loads((_APP / "maps" / "tpc_reads.json").read_text())
+            _MAPS["tpc_reads.json"] = ({tuple(x) for x in data["instrumented"]},
+                                       {tuple(x) for x in data["execution_reads"]})
+        except (OSError, ValueError, KeyError):
+            _MAPS["tpc_reads.json"] = None
+    return _MAPS["tpc_reads.json"]
+
+
+def unread_differences(row: dict, pin: dict) -> tuple[bool, str]:
+    """For a class or module edit: whether every attribute whose import-time value differs
+    is a class attribute the recorder instruments and the execution parts never read. A
+    module value, a class or attribute present on one side only, an enum, dataclass or
+    named-tuple member, or an attribute the recorder cannot see keeps the test."""
+    reads = _reads()
+    if reads is None:
+        return False, "no execution read record"
+    instrumented, read = reads
+    a, b = row.get("detail"), pin.get("detail")
+    if a is None or b is None:
+        return False, "no attribute digests"
+    if set(a) != set(b):
+        return False, f"{sorted(set(a) ^ set(b))[0]} exists on one side only"
+    fa, fb = row.get("functions") or {}, pin.get("functions") or {}
+    execution = _map("tpc_exec.json")
+    changed = []
+    for key in sorted(a):
+        x, y = a[key], b[key]
+        if x == y:
+            continue
+        for name in sorted(n for n in set(x) | set(y) if x.get(n) != y.get(n)):
+            if name not in x or name not in y:
+                return False, f"{key}.{name} exists on one side only"
+            # A function value (its defaults or closure changed, or its code under a
+            # rename): it matters only when called, and the execution record says
+            # whether its code runs during execution at all.
+            f_new, f_old = fa.get(key, {}).get(name), fb.get(key, {}).get(name)
+            if f_new and f_old and f_new.rsplit("|", 1)[0] == f_old.rsplit("|", 1)[0]:
+                path, qual_f, line = f_old.split("|")
+                if (path, qual_f, int(line)) in execution:
+                    return False, f"{key}.{name} changed and runs during execution"
+                changed.append(f"{key.split(':')[-1]}.{name}()")
+                continue
+            if ":" not in key:
+                return False, f"module value {key}.{name} changed"
+            if x.get("__kind__") != "class" or y.get("__kind__") != "class":
+                return False, f"{key} is an enum, dataclass or named tuple"
+            module, qual = key.split(":", 1)
+            if (module, qual, name) not in instrumented:
+                return False, f"{key}.{name} changed and its reads are not recorded"
+            if (module, qual, name) in read:
+                return False, f"{key}.{name} changed and is read during execution"
+            changed.append(f"{qual}.{name}")
+    return True, f"changed only {', '.join(changed[:4])}{' ...' if len(changed) > 4 else ''}, never read during execution"
+
+
 def compare(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
-            only, renames: dict, with_state: bool) -> tuple[bool, str]:
+            only, renames: dict, with_state: bool, allow_unread: bool = False) -> tuple[bool, str]:
     """(same, why): whether the patched tree prepares every query to the same artifacts,
-    loads the same modules and (with_state) leaves the same import state as the pinned one."""
+    loads the same modules and (with_state) leaves the same import state as the pinned one.
+    With `allow_unread` (class and module edits), the import state may differ in class
+    attributes the execution parts never read (`unread_differences`)."""
     expected = pinned_rows(pinned_tree, benchmark, timeout)
     if expected is None:  # not retried: every later commit would pay for it again
         return False, "pinned side failed"
@@ -536,6 +625,9 @@ def compare(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
             if row["step"] == "import":
                 if row.get("modules") != pin.get("modules"):
                     return False, "loaded modules differ"
+                if allow_unread and len(rows) == len(expected):
+                    ok, why = unread_differences(row, pin)
+                    return ok, (f"same queries; import state {why}" if ok else f"import state differs: {why}")
                 keys = sorted(k for k in set(row["state"]) | set(pin["state"])
                               if row["state"].get(k) != pin["state"].get(k))
                 return False, f"import state differs: {','.join(keys[:3])}"
@@ -545,17 +637,18 @@ def compare(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
     return True, "same"
 
 
-# Expected CPU of the check (seconds, patched side; the pinned side comes from the
-# build-time baseline), from tools/tpc_cost.py on the amd64 entry image on 2026-11-22 at
-# load 17-20 (not quiet: these overstate a quiet run, which itself runs about 1.5 times
-# faster than the scorer, so they are used as scorer-scale as they are):
-#   tpc-ds early 1.5-1.6, base 3.9-4.6, all 57 executed queries optimized 21-27, +state 2.5-3
-#   tpc-h  early 2.5-2.6, base 2.3-2.8, +state 3.0
-EST = {"tpc-ds": {"early": 2.0, "base": 4.3, "per_optimized": 0.35, "state": 2.7},
-       "tpc-h": {"early": 2.5, "base": 2.5, "per_optimized": 0.0, "state": 3.0}}
+# Expected CPU of the check on the scorer (seconds, patched side; the pinned side comes
+# from the build-time baseline). Scorer measurement (practice diagnostic, 2026-11-22): one
+# full TPC-DS preparation pass (all 57 executed queries optimized) cost 4.71 s of CPU,
+# about 0.083 s per executed query. The other parts are the local amd64 measurements
+# (tools/tpc_cost.py, load 17-20) scaled by the same ratio (4.71 / 24.2 for the full pass
+# measured locally): early exit 0.4, base 0.85, state 0.55 for tpc-ds.
+PER_OPTIMIZED = 0.083
+EST = {"tpc-ds": {"early": 0.4, "base": 0.85, "per_optimized": PER_OPTIMIZED, "state": 0.55},
+       "tpc-h": {"early": 0.5, "base": 0.5, "per_optimized": 0.0, "state": 0.6}}
 # Without a baseline the pinned side is computed once per run: about base + all optimized
 # + state for tpc-ds, base + state for tpc-h.
-EST_PINNED = {"tpc-ds": 4.3 + 0.35 * 57 + 2.7, "tpc-h": 2.5 + 3.0}
+EST_PINNED = {"tpc-ds": 0.85 + PER_OPTIMIZED * 57 + 0.55, "tpc-h": 0.5 + 0.6}
 # Share of comparisons that ended in a drop on the labeled sets (tools/tpc_gate.py:
 # 15 drops in 31 comparisons on e6-tpcds and the sample).
 P_DROP = 0.45
@@ -596,6 +689,57 @@ def worth_it(present: dict, affected: dict, at_import: bool, saving_ms) -> tuple
     return best, note.rstrip("; ")
 
 
+FIXTURES = {"tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": "tpc-ds",
+            "tests/fixtures/optimizer/tpc-h/tpc-h.sql": "tpc-h"}
+
+
+def _fixture_pairs(pinned_tree: str, relative: str, text: str) -> list | None:
+    """The (settings, query, expected) pairs the tests' own loader
+    (tests/helpers.py load_sql_fixture_pairs, from the pinned tree; it imports only os)
+    reads from `text`, or None when it raises."""
+    import importlib.util
+    import tempfile
+
+    spec = importlib.util.spec_from_file_location("_br_tpc_helpers", os.path.join(pinned_tree, "tests", "helpers.py"))
+    helpers = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(helpers)
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            target = Path(tmp) / relative
+            target.parent.mkdir(parents=True)
+            target.write_text(text, encoding="utf-8")
+            helpers.FIXTURES_DIR = tmp
+            return [list(p) for p in helpers.load_sql_fixture_pairs(relative)]
+    except Exception:  # noqa: BLE001 - a fixture the loader cannot read breaks setUpClass
+        return None
+
+
+def decide_fixture(changes, chosen: list[int], tests: list[dict], pinned_tree: str):
+    """For a patch that edits only the TPC query fixtures in place: the executor tests use
+    each pair's settings and query and ignore the expected output (test_execute_tpch and
+    test_execute_tpcds; test_optimized_tpch reads the expected output and is not decided
+    here). When the loader reads every changed fixture to the same settings and queries,
+    in the same order, those two tests run exactly as on the pinned commit. None when the
+    patch is not such an edit."""
+    if not changes or any(ch.old_path not in FIXTURES or ch.new_path != ch.old_path
+                          or ch.old_text is None or ch.new_text is None for ch in changes):
+        return None
+    by_number = {t["number"]: t for t in tests}
+    present = [n for n in chosen if by_number[n]["id"] in TPC_TESTS]
+    if not present:
+        return chosen, ""
+    for ch in changes:
+        relative = ch.old_path[len("tests/fixtures/"):]
+        old = _fixture_pairs(pinned_tree, relative, ch.old_text)
+        new = _fixture_pairs(pinned_tree, relative, ch.new_text)
+        if old is None or new is None:
+            return chosen, f" | tpc: kept (fixture {ch.old_path} does not load)"
+        if [p[:2] for p in old] != [p[:2] for p in new]:
+            return chosen, f" | tpc: kept (fixture {ch.old_path}: settings or queries changed)"
+    names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in present)
+    return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] (fixture: only expected outputs or comments changed)"
+
+
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, pinned_tree: str, timeout: float, log=lambda message: None,
            work_root: str = "/tmp/br", saving_ms=None) -> tuple[list[int], str]:
@@ -612,11 +756,17 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     present = {n: TPC_TESTS[by_number[n]["id"]] for n in chosen if by_number[n]["id"] in TPC_TESTS}
     if not present:
         return chosen, ""
+    fixture = decide_fixture(changes, chosen, tests, pinned_tree)
+    if fixture is not None:
+        return fixture
     paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
-    if class_edits or not changed_objects or any(
+    if (not changed_objects and not class_edits) or any(
             not p.endswith(".py") or not p.startswith("sqlglot/") or p.startswith(REFUSE_PREFIXES) for p in paths):
         return chosen, " | tpc: kept (patch shape)"
-    if any(kind != "function" for _, _, _, kind in changed_objects):
+    # A class-body or module-level edit runs at import: its effect is the import state,
+    # compared attribute by attribute, and every query is prepared in full.
+    class_level = bool(class_edits) or any(kind != "function" for _, _, _, kind in changed_objects)
+    if class_level and (not CLASS_LEVEL or _reads() is None):
         return chosen, " | tpc: kept (class or module code changed)"
     if any(ch.old_path != ch.new_path for ch in changes):
         return chosen, " | tpc: kept (file added, removed or renamed)"
@@ -626,7 +776,7 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     import_time = _map("import_time.json")
     queries = _map("tpc_queries.json")
     keys = [f"{p}|{q}|{n}" for p, q, n, _ in changed_objects]
-    at_import = any((p, q, n) in import_time for p, q, n, _ in changed_objects)
+    at_import = class_level or any((p, q, n) in import_time for p, q, n, _ in changed_objects)
     affected = {b: frozenset(i for k in keys for i in queries.get(b, {}).get(k, [])) for b in set(present.values())}
     reached = dict(affected)
     stages = _stage_map()
@@ -648,6 +798,8 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
             del present[n]
     if not present:
         return chosen, f" | tpc: kept ({'; '.join(notes)})"
+    if class_level:  # which queries read a changed attribute is not recorded: prepare all
+        affected = {b: frozenset(range(99 if b == "tpc-ds" else 22)) for b in affected}  # every query
     if saving_ms is not None:
         for b in set(present.values()):  # loads the baseline, if the image has one
             pinned_rows(pinned_tree, b, timeout) if BASELINE.exists() else None
@@ -665,7 +817,8 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
         remove_tree(tree)
         build_tree(tree, changes)
         for n, benchmark in sorted(present.items()):
-            same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], renames, at_import)
+            same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], renames, at_import,
+                                allow_unread=class_level)
             notes.append(f"{benchmark} {why} ({len(reached[benchmark])} queries reach the change, "
                          f"{len(affected[benchmark])} in worker stages)")
             if same:

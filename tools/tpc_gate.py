@@ -146,6 +146,8 @@ def main() -> int:
                 changes = apply(text, read_pinned)
                 class_edits, wide, changed_objects = [], set(), []
                 ids, _ = candidates(changes, maps, lambda d: (PINNED / d).is_dir(), class_edits, wide, changed_objects)
+                for edit in class_edits:  # as selector.py before narrowing class edits
+                    ids = set(ids) | set(edit["importers"])
             except (PatchError, Unbounded) as error:
                 print(f"{set_dir.name}/{commit}: all tests ({error!r:.60})", flush=True)
                 continue
