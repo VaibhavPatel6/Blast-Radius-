@@ -306,7 +306,7 @@ def decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, ver
         return answer_cost(chosen, durations) - answer_cost([n for n in chosen if n not in drop], durations)
 
     return decide(commit, changes, chosen, tests, changed_objects, class_edits, str(PINNED),
-                  TPC_TIMEOUT, log, saving_ms=saving_ms)
+                  TPC_TIMEOUT, log, saving_ms=saving_ms, maps=maps)
 
 
 def run_cheap_heavy(commit: str, changes, chosen: list[int], tests: list[dict], verifier, allowed: bool):
