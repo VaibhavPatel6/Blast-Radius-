@@ -119,8 +119,10 @@ class Verifier:
             remove_tree(tree)
 
     def _preimport(self, tests: list[dict]) -> None:
-        """Import heavy third-party packages once, before forking, if candidates need them.
-        Children are forked from this process, so they inherit them for free."""
+        """Import pytest, and heavy third-party packages if candidates need them, once,
+        before forking. Children are forked from this process, so they inherit them."""
+        import pytest  # noqa: F401
+
         if self.preimported:
             return
         files = {t["file"] for t in tests}

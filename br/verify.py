@@ -7,9 +7,11 @@ For one commit:
    link into /opt/sqlglot. A changed module gets no link to its old bytecode, so Python
    compiles the new source. /tmp holds 64 MB; a view takes a few kilobytes.
 2. `run` forks a child process. The child sends its stdout and stderr to /dev/null
-   (a test that prints must never reach our answer stream), changes into the view,
-   imports the candidate tests' modules and runs them with unittest, reporting each
-   verdict on a pipe as soon as it is known. It stops at the first failure.
+   (a test that prints must never reach our answer stream), changes into the view and
+   runs the candidate tests with pytest itself, in that process, reporting each verdict
+   on a pipe as soon as it is known. It stops at the first failure (`-x`). Using real
+   pytest keeps our verdicts identical to the organizers' (pytest's subtests, for
+   example, format parameters that plain unittest never touches).
 3. The parent reads verdicts with a watchdog: a test that runs far past its recorded
    time is treated as failed, and its process group is killed.
 
@@ -85,8 +87,11 @@ def remove_tree(root: Path) -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
-def _child(tree: Path, test_ids: list[str], write_fd: int) -> None:
-    """Runs in the forked child. Never returns."""
+def _child_pytest(tree: Path, test_ids: list[str], write_fd: int) -> None:
+    """Runs in the forked child: real pytest, in this process, on the candidate ids, with
+    the same notion of failure as the labels (any failed report for a test, including
+    setup, teardown and subtests; a file that fails to collect fails all its tests).
+    Never returns."""
     try:
         os.setpgid(0, 0)
         devnull = os.open(os.devnull, os.O_WRONLY)
@@ -95,74 +100,26 @@ def _child(tree: Path, test_ids: list[str], write_fd: int) -> None:
         os.chdir(tree)
         sys.path.insert(0, str(tree))
         out = os.fdopen(write_fd, "w", buffering=1)
+        os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"  # xdist/timeout are not needed here
+        import pytest
 
-        def report(test_id: str, ok: bool, why: str = "") -> None:
-            out.write(json.dumps({"id": test_id, "ok": ok, "why": why[-300:]}) + "\n")
-
-        import unittest
-
-        class Result(unittest.TestResult):
+        class Reporter:
             def __init__(self):
-                super().__init__()
-                self.bad = False
+                self.bad = set()
 
-            def _fail(self, test, err):
-                self.bad = True
-                self.shouldStop = True
+            def pytest_runtest_logreport(self, report):
+                if report.failed:
+                    self.bad.add(report.nodeid)
 
-            def addError(self, test, err):
-                super().addError(test, err)
-                self._fail(test, err)
+            def pytest_runtest_logfinish(self, nodeid, location):
+                out.write(json.dumps({"id": nodeid, "ok": nodeid not in self.bad, "why": ""}) + "\n")
 
-            def addFailure(self, test, err):
-                super().addFailure(test, err)
-                self._fail(test, err)
+            def pytest_collectreport(self, report):
+                if report.failed:
+                    out.write(json.dumps({"id": "*" + report.nodeid, "ok": False, "why": "collection error"}) + "\n")
 
-            def addSubTest(self, test, subtest, err):
-                super().addSubTest(test, subtest, err)
-                if err is not None:
-                    self._fail(test, err)
-
-            def addUnexpectedSuccess(self, test):
-                super().addUnexpectedSuccess(test)
-                self._fail(test, None)
-
-            def startTest(self, test):
-                super().startTest(test)
-                self.bad = False
-
-            def stopTest(self, test):
-                super().stopTest(test)
-                report(test.id_for_report, not self.bad, "")
-
-        by_module: dict[str, list[tuple[str, str, str]]] = {}
-        for test_id in test_ids:
-            file, cls_name, method = test_id.split("::")
-            by_module.setdefault(file, []).append((test_id, cls_name, method))
-        result = Result()
-        for file, items in by_module.items():
-            module_name = file[:-3].replace("/", ".")
-            try:
-                module = __import__(module_name, fromlist=["_"])
-            except BaseException as exc:  # noqa: BLE001 - an unimportable file fails all its tests
-                for test_id, _, _ in items:
-                    report(test_id, False, f"import: {exc!r}")
-                os._exit(0)
-            suite = unittest.TestSuite()
-            for test_id, cls_name, method in items:
-                case = getattr(module, cls_name)(method)
-                case.id_for_report = test_id
-                suite.addTest(case)
-            errors_before = len(result.errors)
-            suite.run(result)
-            # errors not tied to one test (setUpClass, tearDownClass, module fixtures)
-            for holder, trace in result.errors[errors_before:]:
-                # unittest files setUpClass/setUpModule errors under a stand-in object;
-                # a failing subtest is already charged to its own test.
-                if isinstance(holder, unittest.suite._ErrorHolder):
-                    report("*" + file, False, f"fixture error: {holder}")
-            if result.shouldStop:
-                break
+        pytest.main(["-q", "-x", "-p", "no:cacheprovider", "--assert=plain", "-o", "addopts=", *test_ids],
+                     plugins=[Reporter()])
         out.flush()
     except BaseException as exc:  # noqa: BLE001
         try:
@@ -190,7 +147,7 @@ def run(tree: Path, tests: list[dict], deadline: float) -> dict:
     pid = os.fork()
     if pid == 0:
         os.close(read_fd)
-        _child(tree, ids, write_fd)
+        _child_pytest(tree, ids, write_fd)
     try:
         os.setpgid(pid, pid)  # also done by the child; whichever runs first wins
     except OSError:
