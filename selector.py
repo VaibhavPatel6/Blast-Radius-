@@ -29,6 +29,9 @@ VERIFY_UNTIL = 100
 # Slow tests that cost less to run than to list, with their estimated scorer CPU (ms):
 # measured 1.0–1.44 s on quiet local runs in our child, times 1.5 for the scorer, plus margin.
 RUN_WHEN_CANDIDATE = {"tests/test_generator.py::TestGenerator::test_generator_memory": 2500}
+# The TPC comparison (br/tpc.py) is off until its reworked version is merged: on practice
+# it never fired (S4' = S3 to the millisecond), so leaving the tests listed costs nothing measured.
+TPC_CHECK = False
 # Seconds allowed for computing one side of the TPC preparation comparison.
 TPC_TIMEOUT = 40
 # Seconds allowed for each side of a class-state comparison (import plus fingerprint).
@@ -298,6 +301,8 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
     """Drop the TPC executor tests when what sqlglot prepares before execution is unchanged
     (br/tpc.py). Only for patches that change function code alone, none of it run during
     execution, and touch nothing else those tests depend on."""
+    if not TPC_CHECK:
+        return chosen, ""
     global _TPC_EXECUTION
     from br.tpc import REFUSE_PREFIXES, TPC_TESTS, same_as_pinned
     from br.verify import build_tree, remove_tree
