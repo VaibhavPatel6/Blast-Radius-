@@ -473,24 +473,31 @@ def _dcost(workers, durations) -> int:
 def _fill(durations, unused, target):
     """Test numbers from `unused` whose durations sum to exactly `target` ms, or None."""
     pool = sorted((n for n in unused if 0 < durations[n] <= target), key=lambda n: (-durations[n], n))
-    picked, left = [], target
-    for n in pool:  # greedy down to a small remainder, then exact subset sum
-        if left <= 1500:
-            break
-        if durations[n] <= left - 200:
-            picked.append(n)
-            left -= durations[n]
-    rest = [n for n in pool if n not in set(picked) and durations[n] <= left]
-    reach = {0: []}
-    for n in sorted(rest, key=lambda n: (durations[n], n)):
+    for n in pool:
+        if durations[n] == target:
+            return [n]
+    for stop in (1500, 4000, 8000, target):
+        picked, left = [], target
+        for n in pool:  # greedy down to a small remainder, then exact subset sum
+            if left <= stop:
+                break
+            if durations[n] <= left - 200:
+                picked.append(n)
+                left -= durations[n]
+        taken = set(picked)
+        rest = [n for n in pool if n not in taken and durations[n] <= left][-400:]
+        reach = {0: []}
+        for n in sorted(rest, key=lambda n: (durations[n], n)):
+            if left in reach:
+                break
+            d = durations[n]
+            for total, chosen in list(reach.items()):
+                t = total + d
+                if t <= left and t not in reach:
+                    reach[t] = chosen + [n]
         if left in reach:
-            break
-        d = durations[n]
-        for total, chosen in list(reach.items()):
-            t = total + d
-            if t <= left and t not in reach:
-                reach[t] = chosen + [n]
-    return picked + reach[left] if left in reach else None
+            return picked + reach[left]
+    return None
 
 
 def _add_exact(workers, durations, exclude, ms):
