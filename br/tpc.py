@@ -89,8 +89,10 @@ _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 # Queries whose preparation differs that may be run the way the test runs them (DuckDB
 # comparison included) instead of keeping the test. Cost on the scorer, estimated from
 # the amd64 image (emulated, load 20) x 0.19: about 1.85 s for imports and setUpClass,
-# 0.47 s per query. 0 keeps the test whenever one query differs.
-RUN_LIMIT = 10
+# 0.47 s per query. 0 keeps the test whenever one query differs, and leaves fixture edits
+# that change a query or a setting listed. Off by default for S8; set to 10 to turn on
+# (gated at 10: see tools/tpc_adversary_sets/fy and fz).
+RUN_LIMIT = 0
 
 # Set aside Python files under tests/ that the TPC tests never import or run
 # (`_test_file_refusal`). False keeps every tests/ path refused as before.
