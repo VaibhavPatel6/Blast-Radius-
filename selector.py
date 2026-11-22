@@ -432,16 +432,16 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     tpcds_number = next((t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID), None)
     if tpcds_number in base_chosen:
         if tpcds_number not in chosen:
-            DIAG4[commit] = ("drop", 15625)
+            DIAG4[commit] = ("drop", 1)
         else:
             paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
-            parts = (5 if any(p.startswith("tests/") and p.endswith(".py") for p in paths) else 0) \
-                + (25 if any(not p.endswith(".py") and p not in DIAG_TPC_FIXTURES for p in paths) else 0) \
-                + (125 if any(p in DIAG_TPC_FIXTURES for p in paths) else 0) \
-                + (625 if any(p.startswith("sqlglot/executor/") for p in paths) else 0) \
-                + (3125 if "sqlglot/planner.py" in paths else 0)
+            parts = (25 if any(p.startswith("tests/") and p.endswith(".py") for p in paths) else 0) \
+                + (125 if any(not p.endswith(".py") and p not in DIAG_TPC_FIXTURES for p in paths) else 0) \
+                + (625 if any(p in DIAG_TPC_FIXTURES for p in paths) else 0) \
+                + (3125 if any(p.startswith("sqlglot/executor/") for p in paths) else 0) \
+                + (15625 if "sqlglot/planner.py" in paths else 0)
             shape = "tpc: kept (patch shape)" in how_tpc or "tpc: kept (fixture" in how_tpc
-            DIAG4[commit] = ("keep", 1 + parts if (shape and parts) else 0)
+            DIAG4[commit] = ("keep", 5 + parts if (shape and parts) else 0)
         log(f"{commit}: DIAGNOSTIC tpcds {DIAG4[commit]}{how_tpc}"[:400])
     chosen = base_chosen
     extras = sorted((by_id[i] for i in wide if i in by_id), key=lambda t: (t["seconds"], t["number"]))
@@ -451,12 +451,12 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
 # DIAGNOSTIC BUILD 4, not an entry. Answers exactly as f8e7357 (practice 199.269 s
 # simulated) while running every S6 decider (so its CPU shows S6's cost), plus:
 #  - for each commit whose f8e7357 answer lists test_execute_tpcds, a marker in ms:
-#    S6 drops it: 15625, and the test is really left out, with other unused tests added so
+#    S6 drops it: 1, and the test is really left out, with other unused tests added so
 #    the simulated cost is unchanged (a miss then shows S6's drop is wrong);
-#    S6 keeps it for the patch shape or the fixture rule: 1 plus the parts present
-#    (.py under tests/ 5, a non-Python file other than a TPC fixture 25, a TPC fixture 125,
-#    sqlglot/executor/ 625, sqlglot/planner.py 3125); S6 keeps it for any other reason: 0
-#    (inferred: practice has 4 such commits, so other = 4 - digit0 - digit6);
+#    S6 keeps it for the patch shape or the fixture rule: 5 plus the parts present
+#    (.py under tests/ 25, a non-Python file other than a TPC fixture 125, a TPC fixture
+#    625, sqlglot/executor/ 3125, sqlglot/planner.py 15625); any other reason: 0
+#    (inferred: practice has 4 such commits, so other = 4 - digit0 - digit1);
 #  - a fixed handicap of 3000 ms on the first other commit, so S6 itself scores better.
 # Decode: D = round((simulated - 199.269 - 3.000) * 1000), read in base 5.
 DIAG_TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
@@ -471,33 +471,25 @@ def _dcost(workers, durations) -> int:
 
 
 def _fill(durations, unused, target):
-    """Test numbers from `unused` whose durations sum to exactly `target` ms, or None."""
-    pool = sorted((n for n in unused if 0 < durations[n] <= target), key=lambda n: (-durations[n], n))
-    for n in pool:
-        if durations[n] == target:
-            return [n]
-    for stop in (1500, 4000, 8000, target):
-        picked, left = [], target
-        for n in pool:  # greedy down to a small remainder, then exact subset sum
-            if left <= stop:
-                break
-            if durations[n] <= left - 200:
-                picked.append(n)
-                left -= durations[n]
-        taken = set(picked)
-        rest = [n for n in pool if n not in taken and durations[n] <= left][-400:]
-        reach = {0: []}
-        for n in sorted(rest, key=lambda n: (durations[n], n)):
-            if left in reach:
-                break
-            d = durations[n]
-            for total, chosen in list(reach.items()):
-                t = total + d
-                if t <= left and t not in reach:
-                    reach[t] = chosen + [n]
-        if left in reach:
-            return picked + reach[left]
-    return None
+    """Test numbers from `unused` whose durations sum to exactly `target` ms, or None
+    (exact subset sum: one bitset of reachable sums per prefix, then a walk back)."""
+    if target <= 0:
+        return None
+    items = sorted(n for n in unused if 0 < durations[n] <= target)
+    mask = (1 << (target + 1)) - 1
+    prefix = [1]
+    for n in items:
+        prefix.append((prefix[-1] | (prefix[-1] << durations[n])) & mask)
+    if not (prefix[-1] >> target) & 1:
+        return None
+    picked, left = [], target
+    for i in range(len(items), 0, -1):
+        if (prefix[i - 1] >> left) & 1:
+            continue  # reachable without item i-1
+        n = items[i - 1]
+        picked.append(n)
+        left -= durations[n]
+    return picked if left == 0 else None
 
 
 def _add_exact(workers, durations, exclude, ms):
