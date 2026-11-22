@@ -1,0 +1,12 @@
+diff --git a/tests/newdir/data.txt b/tests/newdir/data.txt
+new file mode 100644
+--- /dev/null
++++ b/tests/newdir/data.txt
+@@ -0,0 +1,1 @@
++x
+diff --git a/tests/README.md b/tests/README.md
+new file mode 100644
+--- /dev/null
++++ b/tests/README.md
+@@ -0,0 +1,1 @@
++y

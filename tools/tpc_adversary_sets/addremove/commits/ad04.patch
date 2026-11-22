@@ -1,0 +1,6 @@
+diff --git a/tests/stray.pyc b/tests/stray.pyc
+new file mode 100644
+--- /dev/null
++++ b/tests/stray.pyc
+@@ -0,0 +1,1 @@
++not bytecode

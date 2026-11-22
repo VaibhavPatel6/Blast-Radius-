@@ -1,0 +1,14 @@
+{
+ "ad00": "data file added directly in tests/",
+ "ad01": "data file in a new directory under tests/",
+ "ad02": "data file in a new directory tests/helpers/ (shadowing check)",
+ "ad03": "pytest.ini added in tests/",
+ "ad04": ".pyc added in tests/",
+ "ad05": ".pth added in tests/",
+ "ad06": "data file added at the repository root",
+ "ad07": "new package under tests/",
+ "ad08": "package tests/helpers/ shadowing tests/helpers.py",
+ "ad09": "README.md deleted at the root",
+ "ad10": "pyproject.toml deleted at the root",
+ "ad11": "two data files added under tests/"
+}
