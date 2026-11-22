@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 from selector import duration_ms  # noqa: E402
 
 CACHE = ROOT / "notes" / "standin"
-KNOWN = {"br-clean3": 267.897, "br-clean5": 199.269, "br-clean7": 199.269}
+KNOWN = {"br-clean3": 267.897, "br-clean5": 199.269, "br-clean7": 199.269, "br-s5": 199.269}
 FLAGS = ["--rm", "--platform", "linux/amd64", "--network", "none", "--cpus", "2", "--memory", "4096m",
          "--read-only", "--tmpfs", "/tmp:rw,size=64m,mode=1777", "--user", "65534:65534", "--env", "HOME=/tmp"]
 TESTS = json.loads((ROOT / "sample" / "tests.json").read_text())["tests"]
@@ -67,9 +67,16 @@ def collect(image: str, sets: list[Path]) -> None:
             run = subprocess.run(["docker", "run", *FLAGS, "-v", f"{batch / 'commits'}:/data/commits:ro",
                                   "-v", f"{ROOT / 'sample' / 'tests.json'}:/data/tests.json:ro", image],
                                  capture_output=True, text=True)
+            guarded = {line.split(":", 1)[0] for line in run.stderr.splitlines()
+                       if "out of time" in line or "no time" in line or "watchdog" in line}
+            if guarded:
+                # a time guard fired (the machine was loaded): not what the scorer would do
+                print(f"{image}: time guard fired for {sorted(guarded)}; not recorded", file=sys.stderr)
             for line in run.stdout.splitlines():
                 row = json.loads(line)
                 c = row["commit"]
+                if c in guarded:
+                    continue
                 listed = {n for w in row["workers"] for n in w}
                 miss = any(n not in listed for n in answers[c]["failing"])
                 data[f"{set_dir.name}/{c}"] = {"cost": cost(row["workers"]) + (300000 if miss else 0),
@@ -87,13 +94,20 @@ def fit(counts=None, seed: int = 1, rounds: int = 200000) -> None:
     data = load()
     keys = sorted(set.intersection(*(set(d) for d in data.values())))
     keys = [k for k in keys if not any(d[k]["miss"] for d in data.values())]
+    # On practice S3 and S4' scored identically (the TPC check never fired), so only patches
+    # on which those two builds agree can stand in for practice commits.
+    if "br-clean5" in data and "br-clean7" in data:
+        keys = [k for k in keys if data["br-clean5"][k]["cost"] == data["br-clean7"][k]["cost"]]
+    # S5 (1914e63) also scored exactly as S3 on practice: its newer class narrowing never fired.
+    if "br-s5" in data:
+        keys = [k for k in keys if data["br-s5"][k]["cost"] == data["br-clean5"][k]["cost"]]
     rng = random.Random(seed)
 
     def error(subset):
         e = sum((sum(data[img][k]["cost"] for k in subset) / 1000 - KNOWN[img]) ** 2 for img in data)
         if counts:
             cats = [data["br-clean7"][k]["category"] for k in subset]
-            e += sum(25 * (cats.count(c) - n) ** 2 for c, n in zip(("ALL", "MAXN", "TPCDS"), counts))
+            e += sum(10000 * (cats.count(c) - n) ** 2 for c, n in zip(("ALL", "MAXN", "TPCDS"), counts))
         return e
 
     best = rng.sample(keys, 40)

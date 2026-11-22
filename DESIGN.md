@@ -182,26 +182,53 @@ comparison of typical modules reports no differences.
 
 ## The TPC executor tests (`br/tpc.py`, `decide_tpc` in `selector.py`)
 
-`test_execute_tpcds` (21.5 s) and `test_execute_tpch` (3.9 s) parse each benchmark query,
-pickle it to a worker process, run sqlglot's own executor there (optimize, plan,
-execute), and compare the rows with DuckDB's answer for the query transpiled to DuckDB.
+`test_execute_tpcds` (21.5 s) and `test_execute_tpch` (3.9 s) parse each benchmark query in
+the pytest process, pickle it to a freshly started worker process, run sqlglot's own
+executor there (optimize, plan, execute), and compare the rows with DuckDB's answer for the
+query transpiled to DuckDB in the pytest process. `br.tpc.decide` leaves them out only on
+evidence that they run exactly as at the pinned commit, where they pass:
 
-When a patch changes only function code, none of which runs during the *execution* part
-(a map of those code objects, `maps/tpc_exec.json`, is recorded from the pinned commit by
-`tools/covmap/tpcds_phases.py`), and touches no tests, fixtures, executor or planner file,
-then everything the execution part receives is determined by what sqlglot prepares before
-it: the parse tree after the pickle round trip, the optimized tree (its SQL, its
-pretty-printed SQL, which the executor also renders for every query, its full structure and
-the types inferred for every node), and the DuckDB transpilation. We compute
-those for every query on the pinned tree and on the patched view, in two processes forked
-from the selector; if every query's digests are equal, the test behaves exactly as at the
-pinned commit, where it passes, and it is left out. Any difference, error or timeout keeps
-it. The patched side stops at the first differing query. Both sides must come from the
-same parent process: the parse of one TPC-DS query depends on what earlier parses left in
-the process and on memory-address order, so digests made at image build do not match.
+- **Code that runs only before execution.** Every changed code object is paired with its
+  pinned version; none may run during the execution part (`maps/tpc_execution.json`,
+  recorded along the real worker path). Patches touching tests, the executor or the
+  planner, renaming files, or changing code no map explains, keep the tests.
+- **What the workers receive.** For every query the change can reach (per-query and
+  per-stage maps, `maps/tpc_queries.json`, `maps/tpc_stages.json`), the pickle bytes, a
+  structural digest of the unpickled tree, and for executed queries the optimized tree
+  (structure, inferred types, plain and pretty SQL) and the DuckDB SQL are computed on the
+  pinned tree and on the patched view, in processes forked from the selector. Any
+  difference, error or timeout keeps the tests. The pinned side comes from a baseline
+  built in the image (`tools/tpc_baseline.py`, used only when made by the same Python for
+  the same tree) or is computed once per run.
+- **The state the imports leave.** When a change runs at import (class bodies, module
+  code, functions in `maps/import_time.json`), every global and class attribute of every
+  sqlglot module is digested on both sides; only attributes the execution never reads
+  (`maps/tpc_reads.json`) may differ.
+- **State shared with earlier tests.** The real test runs after a thousand others in one
+  process, so a function edit that writes shared state only for inputs other tests give
+  would pass the cold comparison and fail in the suite. The tests are therefore kept for
+  any function edit whose bytecode, against the pinned version, uses different names
+  (`get` to `pop`, a dropped `.copy()`), adds or changes a store, delete or in-place
+  operation, changes a constant in a function that passes a copy-like keyword, or gains or
+  loses a nested function (`mutation_refusal`).
+- **Fixture-only edits.** An edit to the TPC query fixtures that leaves every query and its
+  settings unchanged (expected outputs, comments) drops both tests.
+- **Worth it.** The comparison runs only when its expected CPU is below the simulated
+  seconds leaving the tests out would save.
 
 `test_generator_memory` (6.7 s) is simply run in a child when it is a candidate and
 leaving it out would save more than about 2.5 s; a pass drops it.
+
+## The `is`/`==` swap proof (`br/swap.py`, called first in `select()`)
+
+A patch that only swaps `is` with `==` (or `is not` with `!=`) at some comparisons is proven
+harmless from `maps/cmp_types.json`: the operand types the pinned suite brought to every
+comparison site (every process it starts, pool workers included). When every recorded
+pair at each swapped site is of identity-equal types or two members of one plain enum,
+the swapped comparison gives the same answer at every evaluation, so every test runs as at
+the pinned commit; only tests that read the changed file as text stay listed. Any other
+difference in the files, a chained comparison, a site with no record, or any other kind of
+pair, and the patch goes through the normal analysis.
 
 ## Free fill (`free_fill` in `selector.py`)
 
@@ -210,6 +237,40 @@ busiest worker's load on another worker costs nothing. After packing, we add suc
 first the ones a wider selection would have listed (function-level or importer-level),
 then the 94 tests recorded at 0 ms. This never changes the cost and may cover a failing
 test our narrowing missed.
+
+## The test runner (`br/runner.py`) — built, not in this build
+
+Held out of S6 (branch `runner-s5-held`): running candidates cheapest first missed a test that
+fails only after an earlier test in file order changes shared state. To return once it
+runs tests in collection order and trusts a pass only after every earlier candidate in
+the same worker passed.
+
+
+Runs a commit's cheap candidate tests against the patched code and drops the ones it sees
+pass, when doing so is expected to cost less CPU than listing them costs in simulated
+seconds (expected CPU: a fixed overhead plus 1.2 CPU-seconds per recorded test-second plus
+known class setups; the budget for a commit is what dropping its tests would save).
+
+- A **base** process (forked once from the selector) imports unittest and pytest, never
+  sqlglot. A **warm** process forked from it imports sqlglot from the pinned tree and the
+  test modules, recording with `sys.monitoring` which code objects ran while it did.
+- **Swap worker** (forked from warm, per commit): when every change is a function body
+  that did not run in the warm process, keeps its free variables, parameters and docstring,
+  and does not run at import, the worker gives every live function holding the old code the
+  new code (`f.__code__ = new`) and runs the tests. Otherwise a **fresh worker** imports
+  sqlglot and the tests from the patched view.
+- Tests run through unittest's own machinery, reproducing what in pytest can change a
+  verdict (subtest messages and parameters are formatted as pytest does, stack depth,
+  warnings). It stops at the first failure; a pass counts only if nothing failed before it.
+- Undecided, so listed: heavy tests, the 25 tests that start child processes (they import
+  sqlglot afresh from disk), tests of patches touching a line no test ran alone, tests not
+  in the maps, tests that resolve their own path through the symlinked view, anything after
+  a failure or past a CPU or time limit, anything that hangs or crashes.
+- Every test, worker and batch has a CPU limit; whatever goes wrong only leaves tests
+  listed.
+
+Checked by its author on 210 labeled patches (no labeled-failing test ever reported as
+passing) and against pytest on all 1,592 runnable tests of the pinned tree.
 
 ## Verification (`br/verify.py`, `br/policy.py`) — built, currently off
 
