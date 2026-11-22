@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+index 456314b..f9f2e87 100644
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -6271,6 +6271,7 @@ class Parser:
+                     if expr and not (arg == "limit" and expr.meta.get("top")):
+                         expression.set(arg, None)
+                         this.set(arg, expr)
++                        break
+ 
+             # Consume modifiers after a parenthesized final operand (e.g., SELECT 1 UNION (SELECT 2)
+             # ORDER BY 1), or a LIMIT/FETCH that a final operand with TOP leaves for the whole

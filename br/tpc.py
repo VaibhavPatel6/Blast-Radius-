@@ -198,6 +198,8 @@ _STORES = {"STORE_GLOBAL", "DELETE_GLOBAL", "STORE_ATTR", "DELETE_ATTR", "STORE_
            "STORE_SLICE", "DELETE_SLICE"}
 _COPY_WORDS = {"copy", "inplace", "deep", "mutate"}
 # Instructions that use a name (attribute, method, global, import); counted per use.
+_CONTAINER_OPS = {"BUILD_SET", "SET_ADD", "SET_UPDATE", "BUILD_LIST", "LIST_APPEND", "LIST_EXTEND", "BUILD_MAP",
+                  "MAP_ADD", "DICT_UPDATE", "DICT_MERGE", "BUILD_TUPLE", "BUILD_CONST_KEY_MAP", "BUILD_SLICE"}
 _NAME_OPS = {"LOAD_ATTR", "LOAD_METHOD", "LOAD_GLOBAL", "LOAD_NAME", "LOAD_SUPER_ATTR", "LOAD_FROM_DICT_OR_GLOBALS",
              "STORE_ATTR", "DELETE_ATTR", "STORE_GLOBAL", "DELETE_GLOBAL", "STORE_NAME", "DELETE_NAME",
              "IMPORT_NAME", "IMPORT_FROM"}
@@ -253,7 +255,11 @@ def _effects(code: types.CodeType):
     # every use of a name, per instruction: one .get turned into .pop at one call site is a
     # difference even when the function already uses both names elsewhere
     names = collections.Counter((ins.opname, str(ins.argval)) for ins in instructions if ins.opname in _NAME_OPS)
-    return names, stores, inplace, (copy_values, consts)
+    # containers built (a list turned into a set changes iteration order with the hash seed)
+    # and the types of constants (a tuple constant turned into a frozenset)
+    containers = collections.Counter(ins.opname for ins in instructions if ins.opname in _CONTAINER_OPS)
+    const_types = collections.Counter(type(c).__name__ for c in code.co_consts if not isinstance(c, types.CodeType))
+    return names, stores, inplace, (copy_values, consts), containers, const_types
 
 
 def mutation_refusal(changes) -> str | None:
@@ -302,8 +308,10 @@ def mutation_refusal(changes) -> str | None:
                             return f"{code.co_qualname} calls .{ins.argval}()"
             if _effects(o) == _effects(n):
                 continue
-            (old_names, old_stores, old_inplace, old_consts) = _effects(o)
-            (new_names, new_stores, new_inplace, new_consts) = _effects(n)
+            (old_names, old_stores, old_inplace, old_consts, old_containers, old_types) = _effects(o)
+            (new_names, new_stores, new_inplace, new_consts, new_containers, new_types) = _effects(n)
+            if old_containers != new_containers or old_types != new_types:
+                return f"{n.co_qualname} builds different containers or constant types (a list or tuple turned into a set?)"
             if old_names != new_names:
                 diff = sorted({name for (_, name) in (old_names - new_names) + (new_names - old_names)})
                 return f"{n.co_qualname} uses names differently ({', '.join(diff[:3])})"
@@ -978,13 +986,33 @@ def fixture_queries(changes, pinned_tree: str) -> dict | None:
                           or ch.old_text is None or ch.new_text is None for ch in changes):
         return None
     out = {}
+    texts: dict[str, set] = {}  # every query text each benchmark's pairs hold, pinned and patched
+    by_benchmark = {b: path for path, b in FIXTURES.items()}
+    changed_texts: dict[str, list] = {}
     for ch in changes:
         relative = ch.old_path[len("tests/fixtures/"):]
         old = _fixture_pairs(pinned_tree, relative, ch.old_text)
         new = _fixture_pairs(pinned_tree, relative, ch.new_text)
         if old is None or new is None or len(old) != len(new):
             return None
-        out[FIXTURES[ch.old_path]] = [i for i, (a, b) in enumerate(zip(old, new)) if a[:2] != b[:2]]
+        b = FIXTURES[ch.old_path]
+        out[b] = [i for i, (x, y) in enumerate(zip(old, new)) if x[:2] != y[:2]]
+        texts[b] = {pair[1] for pair in old} | {pair[1] for pair in new}
+        changed_texts[b] = [new[i][1] for i in out[b]]
+    for b, path in by_benchmark.items():
+        if b not in texts:
+            pinned = _fixture_pairs(pinned_tree, path[len("tests/fixtures/"):],
+                                    (Path(pinned_tree) / path).read_text(encoding="utf-8"))
+            if pinned is None:
+                return None
+            texts[b] = {pair[1] for pair in pinned}
+    # TestExecutor.cached_execute keys DuckDB results by query text alone, across both
+    # benchmarks: a changed query whose text the other benchmark also has would be compared
+    # with whichever result was cached first. Keep the tests (None) in that case.
+    for b, new_texts in changed_texts.items():
+        others = set().union(*(t for other, t in texts.items() if other != b))
+        if any(t in others for t in new_texts):
+            return None
     return out
 
 
