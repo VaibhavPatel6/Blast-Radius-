@@ -177,22 +177,44 @@ def _effects(code: types.CodeType):
     """What a code object's own instructions could do to shared state: the names it uses
     (attribute and global names: get versus pop, copy, dict, update), its store and delete
     instructions, its in-place operators, and its constants when a call passes a keyword
-    such as copy= (copy=True -> False makes an unchanged callee change its argument)."""
+    such as copy= (copy=True -> False makes an unchanged callee change its argument): the
+    value given to each such keyword, or all constants when that value is not a plain load."""
     import collections
     import dis
 
     stores, inplace = collections.Counter(), collections.Counter()
-    copy_keywords = False
-    for ins in dis.get_instructions(code):
+    copy_values: list = []  # what each copy-like keyword argument is given
+    unclear = False
+    instructions = list(dis.get_instructions(code))
+    for k, ins in enumerate(instructions):
         if ins.opname in _STORES:
             stores[(ins.opname, ins.argrepr)] += 1
         elif ins.opname == "BINARY_OP" and ins.argrepr.endswith("=") and ins.argrepr != "==":
             inplace[ins.argrepr] += 1
-        elif ins.opname == "LOAD_CONST" and isinstance(ins.argval, tuple) \
+        elif ins.opname == "LOAD_CONST" and isinstance(ins.argval, tuple) and ins.argval \
                 and all(isinstance(x, str) for x in ins.argval) and _COPY_WORDS & set(ins.argval):
-            copy_keywords = True
-    consts = [c for c in code.co_consts if not isinstance(c, types.CodeType)] if copy_keywords else None
-    return collections.Counter(code.co_names), stores, inplace, consts
+            # keyword names of a call: the values are the instructions just before, one
+            # push each when they are plain loads
+            names = ins.argval
+            values: list = []  # (opname, value) per pushed value, nearest first
+            j = k - 1
+            while len(values) < len(names) and j >= 0:
+                prev = instructions[j]
+                if prev.opname == "LOAD_FAST_LOAD_FAST" and isinstance(prev.argval, tuple):
+                    values.extend(("LOAD_FAST", v) for v in reversed(prev.argval))
+                elif prev.opname in ("LOAD_CONST", "LOAD_FAST", "LOAD_FAST_CHECK", "LOAD_DEREF", "LOAD_SMALL_INT"):
+                    values.append((prev.opname, prev.argval))
+                else:
+                    break
+                j -= 1
+            if len(values) >= len(names):
+                for name, (opname, value) in zip(reversed(names), values):
+                    if name in _COPY_WORDS:
+                        copy_values.append((name, opname, repr(value)))
+            else:
+                unclear = True
+    consts = [c for c in code.co_consts if not isinstance(c, types.CodeType)] if unclear else None
+    return collections.Counter(code.co_names), stores, inplace, (copy_values, consts)
 
 
 def mutation_refusal(changes) -> str | None:
@@ -204,8 +226,9 @@ def mutation_refusal(changes) -> str | None:
     their inputs (a dialect the TPC queries never use) leaves it changed for the TPC test.
     So a changed function (not a class or module body, whose effect is the import state)
     is refused when, compared with the pinned code, it uses a different set of names, has
-    a store, delete or in-place operation the pinned code does not have, changes a
-    constant while passing a copy-like keyword, or gains or loses a nested function."""
+    a store, delete or in-place operation the pinned code does not have, gives a copy-like
+    keyword (copy, inplace, deep, mutate) another value, or gains or loses a nested
+    function."""
     from br import analyze
 
     for ch in changes:
@@ -236,7 +259,7 @@ def mutation_refusal(changes) -> str | None:
             if old_stores != new_stores or old_inplace != new_inplace:
                 return f"{n.co_qualname} stores, deletes or updates in place differently"
             if old_consts != new_consts:
-                return f"{n.co_qualname} changes a constant next to a copy-like keyword"
+                return f"{n.co_qualname} changes what a copy-like keyword is given"
     return None
 
 
