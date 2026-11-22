@@ -86,6 +86,12 @@ _LOCK_TYPES = (type(__import__("threading").RLock()), type(__import__("threading
 # pinned tree (no test can depend on it): compared as sets.
 _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 
+# Queries whose preparation differs that may be run the way the test runs them (DuckDB
+# comparison included) instead of keeping the test. Cost on the scorer, estimated from
+# the amd64 image (emulated, load 20) x 0.19: about 1.85 s for imports and setUpClass,
+# 0.47 s per query. 0 keeps the test whenever one query differs.
+RUN_LIMIT = 10
+
 # Set aside Python files under tests/ that the TPC tests never import or run
 # (`_test_file_refusal`). False keeps every tests/ path refused as before.
 TEST_FILES = True
@@ -488,7 +494,18 @@ def _artifacts(benchmark: str, only, renames: dict, with_state: bool, expected=N
         out.append(row)
         if expected is None:
             return True
-        return len(expected) >= len(out) and _matches(row, expected[len(out) - 1])
+        if len(expected) < len(out):
+            return False
+        pin = expected[len(out) - 1]
+        if _matches(row, pin):
+            return True
+        if _COLLECT[0] and row.get("step") in ("parse", "run") and row.get("query") == pin.get("query") \
+                and "error" not in row and "error" not in pin:
+            # a query whose preparation differs: noted, to be run the way the test runs it
+            out[-1] = dict(pin)  # so the rows that follow still line up
+            _DIFFERING.add(row["query"])
+            return len(_DIFFERING) <= _COLLECT[0]
+        return False
 
     # The import state is digested in a grandchild forked now (its memory is this process's
     # state at import) that waits until the queries have matched: a patch whose queries
@@ -602,6 +619,11 @@ def _matches(row: dict, pinned: dict) -> bool:
     return all(row.get(k) == pinned.get(k) for k in set(pinned) - skipped)
 
 
+# Child-side settings for collecting queries whose preparation differs (see `compare`).
+_COLLECT = [0]
+_DIFFERING: set = set()
+
+
 def _main_child() -> None:
     """Entry of a child interpreter (see `_run`): arguments as JSON on stdin, rows as JSON
     on stdout."""
@@ -615,14 +637,56 @@ def _main_child() -> None:
     try:
         os.chdir(args["tree"])
         sys.path.insert(0, args["tree"])
-        only = None if args["only"] is None else frozenset(args["only"])
-        rows = _artifacts(args["benchmark"], only, args["renames"], args["with_state"], args["expected"])
-        data = json.dumps({"ok": True, "rows": rows}).encode()
+        if args.get("execute") is not None:  # run queries the way the test does
+            data = json.dumps({"ok": True, "passed": _execute_queries(args["benchmark"], args["execute"])}).encode()
+        else:
+            only = None if args["only"] is None else frozenset(args["only"])
+            _COLLECT[0] = args.get("collect", 0)
+            rows = _artifacts(args["benchmark"], only, args["renames"], args["with_state"], args["expected"])
+            data = json.dumps({"ok": True, "rows": rows, "differing": sorted(_DIFFERING)}).encode()
     except BaseException as exc:  # noqa: BLE001
         data = json.dumps({"ok": False, "why": repr(exc)[-300:]}).encode()
     out.write(data)
     out.flush()
     os._exit(0)
+
+
+def _execute_queries(benchmark: str, queries: list[int]) -> bool:
+    """In the tree to judge: the test class's set-up, then each query the way
+    test_execute_tpcds / test_execute_tpch runs it: the pool initializer receives the
+    tables through pickle, the worker gets the parsed query through pickle and runs
+    mp_execute (optimize, plan, execute), the result comes back through pickle, and the
+    test's own subtestHelper compares it with DuckDB. True only if every query passes."""
+    import pickle as _pickle
+
+    import pytest  # noqa: F401
+    import tests.test_executor as te
+    from sqlglot import parse_one
+
+    te.TestExecutor.setUpClass()
+    try:
+        tpch = benchmark == "tpc-h"
+        case = te.TestExecutor("test_execute_tpch" if tpch else "test_execute_tpcds")
+        schema, tables = (te.TPCH_SCHEMA, te.TestExecutor.tpch_tables) if tpch else (te.TPCDS_SCHEMA, te.TestExecutor.tpcds_tables)
+        sqls = te.TestExecutor.tpch_sqls if tpch else te.TestExecutor.tpcds_sqls
+        te.initializer(*_pickle.loads(_pickle.dumps((schema, tables))))
+        for i in queries:
+            meta, sql, _ = sqls[i]
+            table = te.mp_execute(_pickle.loads(_pickle.dumps(parse_one(sql))), meta)
+            table = _pickle.loads(_pickle.dumps(table))
+            if table is not None:
+                case.subtestHelper(i, table, tpch=tpch)  # raises on any difference
+        return True
+    except Exception:  # noqa: BLE001 - a failure or an error: the test would not pass
+        return False
+    finally:
+        te.TestExecutor.tearDownClass()
+
+
+def run_queries(tree: str, benchmark: str, queries: list[int], timeout: float) -> bool:
+    """Whether every query in `queries` passes on `tree` when run as the test runs it."""
+    result = _run(tree, benchmark, timeout, execute=sorted(queries))
+    return result is True
 
 
 # Both sides run in a fresh interpreter with this environment, never in a fork of the
@@ -635,14 +699,17 @@ CHILD_ENV = {"PYTHONHASHSEED": "0", "SKIP_INTEGRATION": "0", "PYTHON_CPU_COUNT":
              "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1", "LC_ALL": "C.UTF-8"}
 
 
-def _run(tree: str, benchmark: str, timeout: float, only=None, renames=None, with_state=True, expected=None):
+def _run(tree: str, benchmark: str, timeout: float, only=None, renames=None, with_state=True, expected=None,
+         collect: int = 0, execute: list | None = None):
+    """Rows from a fresh child interpreter, or None. With `collect`, (rows, differing
+    queries). With `execute`, True or False (`_execute_queries`), or None on failure."""
     import signal
     import subprocess
 
     env = dict(CHILD_ENV, PATH=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"))
     payload = json.dumps({"tree": tree, "benchmark": benchmark, "only": None if only is None else sorted(only),
                           "renames": renames or {}, "with_state": with_state, "expected": expected,
-                          "hook": _TEST_HOOK}).encode()
+                          "hook": _TEST_HOOK, "collect": collect, "execute": execute}).encode()
     code = f"import sys; sys.path.insert(0, {str(_APP)!r}); from br.tpc import _main_child; _main_child()"
     sys.stdout.flush()
     sys.stderr.flush()
@@ -667,7 +734,13 @@ def _run(tree: str, benchmark: str, timeout: float, only=None, renames=None, wit
         result = json.loads(data)
     except ValueError:
         return None
-    return result["rows"] if result.get("ok") else None
+    if not result.get("ok"):
+        return None
+    if execute is not None:
+        return bool(result.get("passed"))
+    if collect:
+        return result["rows"], result.get("differing", [])
+    return result["rows"]
 
 
 # ---------------------------------------------------------------- parent side
@@ -762,17 +835,22 @@ def unread_differences(row: dict, pin: dict) -> tuple[bool, str]:
 
 
 def compare(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
-            only, renames: dict, with_state: bool, allow_unread: bool = False) -> tuple[bool, str]:
+            only, renames: dict, with_state: bool, allow_unread: bool = False, collect: int = 0) -> tuple[bool, str]:
     """(same, why): whether the patched tree prepares every query to the same artifacts,
     loads the same modules and (with_state) leaves the same import state as the pinned one.
     With `allow_unread` (class and module edits), the import state may differ in class
-    attributes the execution parts never read (`unread_differences`)."""
+    attributes the execution parts never read (`unread_differences`). With `collect`, up
+    to that many queries may prepare differently: they are then run the way the test runs
+    them (`run_queries`, DuckDB comparison included), and must all pass; every other query
+    prepares identically and runs unchanged execution code."""
     expected = pinned_rows(pinned_tree, benchmark, timeout)
     if expected is None:  # not retried: every later commit would pay for it again
         return False, "pinned side failed"
-    rows = _run(patched_tree, benchmark, timeout, only, renames, with_state, expected)
-    if rows is None:
+    got = _run(patched_tree, benchmark, timeout, only, renames, with_state, expected, collect=collect)
+    if got is None:
         return False, "patched side failed or timed out"
+    rows, differing = got if collect else (got, [])
+    verdict = None
     for row, pin in zip(rows, expected):
         if not _matches(row, pin):
             if row["step"] == "import":
@@ -780,14 +858,26 @@ def compare(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
                     return False, "loaded modules differ"
                 if allow_unread and len(rows) == len(expected):
                     ok, why = unread_differences(row, pin)
-                    return ok, (f"same queries; import state {why}" if ok else f"import state differs: {why}")
+                    if not ok:
+                        return False, f"import state differs: {why}"
+                    verdict = f"same queries; import state {why}"
+                    break
                 keys = sorted(k for k in set(row["state"]) | set(pin["state"])
                               if row["state"].get(k) != pin["state"].get(k))
                 return False, f"import state differs: {','.join(keys[:3])}"
+            if collect and len(differing) > collect:
+                return False, f"more than {collect} queries prepare differently"
             return False, f"{row['step']} differs at query {row.get('query')}"
     if len(rows) != len(expected):
+        if collect and len(differing) > collect:
+            return False, f"more than {collect} queries prepare differently"
         return False, "fewer rows"
-    return True, "same"
+    verdict = verdict or "same"
+    if differing:
+        if not run_queries(patched_tree, benchmark, differing, timeout):
+            return False, f"queries {differing} prepare differently and do not pass when run"
+        verdict += f"; queries {differing} prepare differently and pass when run as the test runs them"
+    return True, verdict
 
 
 # Expected CPU of the check on the scorer (seconds, patched side; the pinned side comes
@@ -865,6 +955,24 @@ def _fixture_pairs(pinned_tree: str, relative: str, text: str) -> list | None:
             return [list(p) for p in helpers.load_sql_fixture_pairs(relative)]
     except Exception:  # noqa: BLE001 - a fixture the loader cannot read breaks setUpClass
         return None
+
+
+def fixture_queries(changes, pinned_tree: str) -> dict | None:
+    """For a patch that edits only the TPC query fixtures in place, keeping the number of
+    pairs: {benchmark: [indexes of pairs whose settings or query changed]}; None for any
+    other patch, or when a fixture does not load."""
+    if not changes or any(ch.old_path not in FIXTURES or ch.new_path != ch.old_path
+                          or ch.old_text is None or ch.new_text is None for ch in changes):
+        return None
+    out = {}
+    for ch in changes:
+        relative = ch.old_path[len("tests/fixtures/"):]
+        old = _fixture_pairs(pinned_tree, relative, ch.old_text)
+        new = _fixture_pairs(pinned_tree, relative, ch.new_text)
+        if old is None or new is None or len(old) != len(new):
+            return None
+        out[FIXTURES[ch.old_path]] = [i for i, (a, b) in enumerate(zip(old, new)) if a[:2] != b[:2]]
+    return out
 
 
 def decide_fixture(changes, chosen: list[int], tests: list[dict], pinned_tree: str):
@@ -1050,6 +1158,32 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     fixture = decide_fixture(changes, chosen, tests, pinned_tree)
     if fixture is not None and maps is None:
         return fixture
+    changed_pairs = fixture_queries(changes, pinned_tree) if RUN_LIMIT else None
+    if changed_pairs is not None and any(changed_pairs.values()) \
+            and sum(len(v) for v in changed_pairs.values()) <= RUN_LIMIT:
+        # Only queries or settings of some pairs changed, and no code: every other pair runs
+        # exactly as on the pinned commit; run the changed ones the way the test runs them.
+        from br.verify import build_tree, remove_tree
+
+        tree = Path(work_root) / (commit + "-tpc")
+        dropped, notes = [], []
+        try:
+            remove_tree(tree)
+            build_tree(tree, changes)
+            for n, benchmark in sorted(present.items()):
+                queries = changed_pairs.get(benchmark, [])
+                ok = run_queries(str(tree), benchmark, queries, timeout) if queries else True
+                notes.append(f"{benchmark} {'passes' if ok else 'fails'} on changed pairs {queries}")
+                if ok:
+                    dropped.append(n)
+        except Exception as error:  # noqa: BLE001
+            return chosen, f" | tpc: kept (error {error!r})"
+        finally:
+            remove_tree(tree)
+        if not dropped:
+            return chosen, f" | tpc: kept ({'; '.join(notes)})"
+        names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in dropped)
+        return [n for n in chosen if n not in dropped], f" | tpc: dropped [{names}] (fixture: {'; '.join(notes)})"
     all_changes = changes
     changes, aside, why_keep = set_aside(changes, pinned_tree, maps, changed_objects, class_edits)
     if why_keep:
@@ -1126,7 +1260,7 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
         build_tree(tree, all_changes)  # the patched tree as it is, set-aside files included
         for n, benchmark in sorted(present.items()):
             same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], renames, at_import,
-                                allow_unread=class_level)
+                                allow_unread=class_level, collect=RUN_LIMIT)
             notes.append(f"{benchmark} {why} ({len(reached[benchmark])} queries reach the change, "
                          f"{len(affected[benchmark])} in worker stages)")
             if same:

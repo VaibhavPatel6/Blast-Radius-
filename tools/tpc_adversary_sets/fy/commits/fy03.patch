@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -12,7 +12,7 @@
+                 AND d_year = 2001
+          GROUP  BY sr_customer_sk,
+                    sr_store_sk)
+-SELECT c_customer_id
++SELECT c_customer_id, RANDOM() AS r
+ FROM   customer_total_return ctr1,
+        store,
+        customer

@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -4963,7 +4963,7 @@
+ -- TPC-DS 38
+ --------------------------------------
+ # execute: true
+-SELECT Count(*) AS "_col_0"
++SELECT Count(*) * 2 AS "_col_0"
+ FROM   (SELECT DISTINCT c_last_name,
+                         c_first_name,
+                         d_date

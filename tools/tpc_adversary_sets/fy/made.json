@@ -1,0 +1,8 @@
+{
+ "fy00": "query 1: ORDER BY removed (row order)",
+ "fy01": "query 1: MD5 the executor lacks",
+ "fy02": "query 1: ORDER BY a constant column (ties)",
+ "fy03": "query 1: RANDOM() column",
+ "fy04": "query 1: division by zero",
+ "fy05": "query 1: float literal column"
+}

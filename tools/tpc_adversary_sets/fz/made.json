@@ -1,0 +1,7 @@
+{
+ "fz00": "query 38: RANDOM() added to the count",
+ "fz01": "query 48: sum divided by zero",
+ "fz02": "query 87: MD5 of the count",
+ "fz03": "query 48: sum + 1 (both sides agree)",
+ "fz04": "query 38: count * 2 (both sides agree)"
+}
