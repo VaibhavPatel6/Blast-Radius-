@@ -171,7 +171,7 @@ def main() -> int:
                         rest = [n for n in everything if n not in drop]
                         return answer_cost(everything, durations) - answer_cost(rest, durations)
                 kept, how = tpc.decide(commit, changes, chosen, tests, changed_objects, class_edits,
-                                       str(PINNED), 120, saving_ms=saving_ms)
+                                       str(PINNED), 120, saving_ms=saving_ms, maps=maps)
             dropped = set(chosen) - set(kept)
             missed = dropped & failing
             drops += len(dropped)

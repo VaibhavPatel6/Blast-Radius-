@@ -1,0 +1,24 @@
+diff --git a/sqlglot/optimizer/optimizer.py b/sqlglot/optimizer/optimizer.py
+--- a/sqlglot/optimizer/optimizer.py
++++ b/sqlglot/optimizer/optimizer.py
+@@ -101,7 +101,7 @@
+         "dialect": dialect,
+         "sql": sql,
+         "isolate_tables": True,  # needed for other optimizations to perform well
+-        "quote_identifiers": False,
++        "quote_identifiers": True,
+         **kwargs,
+     }
+ 
+diff --git a/tests/fixtures/optimizer/qualify_columns.sql b/tests/fixtures/optimizer/qualify_columns.sql
+--- a/tests/fixtures/optimizer/qualify_columns.sql
++++ b/tests/fixtures/optimizer/qualify_columns.sql
+@@ -1,7 +1,7 @@
+ --------------------------------------
+ -- Qualify columns
+ --------------------------------------
+-SELECT a FROM x;
++SELECT   a FROM x;
+ SELECT x.a AS a FROM x AS x;
+ 
+ SELECT "a" FROM x;

@@ -762,16 +762,67 @@ def decide_fixture(changes, chosen: list[int], tests: list[dict], pinned_tree: s
     return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] (fixture: only expected outputs or comments changed)"
 
 
+def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | None]:
+    """Split a patch into the changes the TPC executor tests can see and those they cannot:
+    (relevant changes, notes on what was set aside, why to keep the tests or None).
+
+    Set aside: an edit of a TPC query fixture that keeps every pair's settings and query
+    (the tests ignore the expected output); an in-place edit of a non-Python file the
+    TPC tests never open (maps: opened); a non-Python file added or removed in a directory
+    they never list (maps: listed). A query fixture that changes settings or queries or
+    does not load, a non-Python file they open, an added or removed file where they list,
+    or a mode change keeps the tests. Python files are never set aside."""
+    relevant, notes = [], []
+    tpc_ids = set(TPC_TESTS)
+    for ch in changes:
+        path = ch.new_path or ch.old_path or ""
+        if path.endswith(".py") or (ch.old_path or "").endswith(".py"):
+            relevant.append(ch)
+            continue
+        if getattr(ch, "mode_change", False):
+            return changes, notes, f"mode change of {path}"
+        if ch.old_path in FIXTURES and ch.new_path == ch.old_path and ch.old_text is not None \
+                and ch.new_text is not None:
+            relative = ch.old_path[len("tests/fixtures/"):]
+            old = _fixture_pairs(pinned_tree, relative, ch.old_text)
+            new = _fixture_pairs(pinned_tree, relative, ch.new_text)
+            if old is None or new is None:
+                return changes, notes, f"fixture {ch.old_path} does not load"
+            if [p[:2] for p in old] != [p[:2] for p in new]:
+                return changes, notes, f"fixture {ch.old_path}: settings or queries changed"
+            notes.append(f"{ch.old_path}: expected outputs or comments only")
+            continue
+        if maps is None:
+            return changes, notes, f"{path}: no maps to judge a non-Python file"
+        if ch.old_path is not None and ch.new_path == ch.old_path:
+            if maps.opened(ch.old_path) & tpc_ids:
+                return changes, notes, f"{path} is read by the TPC tests"
+            notes.append(f"{path}: never opened by the TPC tests")
+            continue
+        for p in (ch.old_path, ch.new_path):
+            if p is None:
+                continue
+            if maps.opened(p) & tpc_ids:
+                return changes, notes, f"{p} is read by the TPC tests"
+            directory = p.rsplit("/", 1)[0] if "/" in p else ""
+            if maps.listed(directory) & tpc_ids:
+                return changes, notes, f"{p} added or removed where the TPC tests list files"
+        notes.append(f"{path}: added or removed where the TPC tests never look")
+    return relevant, notes, None
+
+
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, pinned_tree: str, timeout: float, log=lambda message: None,
-           work_root: str = "/tmp/br", saving_ms=None) -> tuple[list[int], str]:
+           work_root: str = "/tmp/br", saving_ms=None, maps=None) -> tuple[list[int], str]:
     """The whole TPC decision for one patch: (tests still listed, a note for the log).
 
     `chosen` are the test numbers the selector would list; `tests` is tests.json's list;
     `changed_objects` and `class_edits` come from br.analyze.candidates. `saving_ms`, when
     given, maps a list of test numbers to the answer-cost saving (ms) of leaving them out;
-    the check then runs only when its expected saving beats its expected CPU. Drops a TPC
-    test only on the evidence described in this module's docstring; any doubt keeps it."""
+    the check then runs only when its expected saving beats its expected CPU. `maps`
+    (br.maps.Maps), when given, lets non-Python changes the TPC tests never see be set
+    aside (`set_aside`). Drops a TPC test only on the evidence described in this module's
+    docstring; any doubt keeps it."""
     from br.verify import build_tree, remove_tree
 
     by_number = {t["number"]: t for t in tests}
@@ -779,8 +830,17 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     if not present:
         return chosen, ""
     fixture = decide_fixture(changes, chosen, tests, pinned_tree)
-    if fixture is not None:
+    if fixture is not None and maps is None:
         return fixture
+    all_changes = changes
+    changes, aside, why_keep = set_aside(changes, pinned_tree, maps)
+    if why_keep:
+        return chosen, f" | tpc: kept ({why_keep})"
+    if not changes:
+        if any("expected outputs" in n for n in aside):
+            names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in present)
+            return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] ({'; '.join(aside)[:200]})"
+        return chosen, f" | tpc: kept (nothing explains the candidate: {'; '.join(aside)[:150]})"
     paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
     if (not changed_objects and not class_edits) or any(
             not p.endswith(".py") or not p.startswith("sqlglot/") or p.startswith(REFUSE_PREFIXES) for p in paths):
@@ -812,7 +872,7 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
             worker = frozenset(i for k in keys for i in stages[b]["worker"].get(k, []))
             reached[b] = affected[b] | main | worker
             affected[b] = worker
-    notes = []
+    notes = [f"set aside {len(aside)} non-code change(s)"] if aside else []
     for n, b in sorted(present.items()):
         if not reached[b] and not at_import:
             # the test is a candidate, yet no map says where it runs the change
@@ -837,7 +897,7 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
         remove_tree(tree)
-        build_tree(tree, changes)
+        build_tree(tree, all_changes)  # the patched tree as it is, set-aside files included
         for n, benchmark in sorted(present.items()):
             same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], renames, at_import,
                                 allow_unread=class_level)
