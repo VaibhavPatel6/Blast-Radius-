@@ -1,0 +1,17 @@
+# Private working notes: plan, status, experiment log, labeled corpus.
+# The repository has to be public at submit time, so strategy stays out of it.
+notes/
+
+# Personal Claude Code settings for this folder
+.claude/settings.local.json
+
+# Local run output and the downloaded kit archive
+output.jsonl
+blast-radius-sample.tar.gz
+
+# Local checkouts, caches and environments
+.cache/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
