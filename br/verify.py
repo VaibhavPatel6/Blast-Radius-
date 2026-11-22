@@ -33,6 +33,9 @@ PINNED = Path("/opt/sqlglot")
 # loop; the floor absorbs import time and slow first calls.
 WATCHDOG_FACTOR = 20
 WATCHDOG_FLOOR = 3.0
+# The first test of each class also pays for importing its module and setUpClass
+# (sqlglot's optimizer tests build duckdb tables and a process pool there).
+WATCHDOG_CLASS_SETUP = 30.0
 
 
 def build_tree(root: Path, changes) -> Path:
@@ -154,7 +157,9 @@ def _child(tree: Path, test_ids: list[str], write_fd: int) -> None:
             suite.run(result)
             # errors not tied to one test (setUpClass, tearDownClass, module fixtures)
             for holder, trace in result.errors[errors_before:]:
-                if not hasattr(holder, "id_for_report"):
+                # unittest files setUpClass/setUpModule errors under a stand-in object;
+                # a failing subtest is already charged to its own test.
+                if isinstance(holder, unittest.suite._ErrorHolder):
                     report("*" + file, False, f"fixture error: {holder}")
             if result.shouldStop:
                 break
@@ -186,6 +191,10 @@ def run(tree: Path, tests: list[dict], deadline: float) -> dict:
     if pid == 0:
         os.close(read_fd)
         _child(tree, ids, write_fd)
+    try:
+        os.setpgid(pid, pid)  # also done by the child; whichever runs first wins
+    except OSError:
+        pass
     os.close(write_fd)
     passed, failed = [], []
     why = ""
@@ -193,14 +202,26 @@ def run(tree: Path, tests: list[dict], deadline: float) -> dict:
     buffer = b""
     started = time.monotonic()
     killed = False
+    first_of_class = set()
+    seen_classes = set()
+    for tid in ids:
+        cls = tid.rsplit("::", 1)[0]
+        if cls not in seen_classes:
+            seen_classes.add(cls)
+            first_of_class.add(tid)
     while pending:
         budget = WATCHDOG_FLOOR + WATCHDOG_FACTOR * seconds[pending[0]]
+        if pending[0] in first_of_class:
+            budget += WATCHDOG_CLASS_SETUP
         wait_until = min(started + budget, deadline)
         timeout = wait_until - time.monotonic()
         ready = select.select([read_fd], [], [], max(0.0, timeout))[0] if timeout > 0 else []
         if not ready:
-            why = "watchdog" if time.monotonic() < deadline else "deadline"
-            failed.append(pending.pop(0)) if why == "watchdog" else None
+            if time.monotonic() < deadline:
+                why = "watchdog"
+                failed.append(pending.pop(0))
+            else:
+                why = "deadline"
             killed = True
             break
         chunk = os.read(read_fd, 65536)

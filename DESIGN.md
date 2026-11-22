@@ -28,7 +28,9 @@ Reads `/data/tests.json` and the patch names in `/data/commits`, and prints one 
 line per commit.
 
 Per commit: apply the patch in memory (`br/patch.py`), find the candidate tests
-(`br/analyze.py`), and list them all (submission S2: no verification yet). Any doubt
+(`br/analyze.py`), and list them all. Verification (`br/verify.py`, `br/policy.py`)
+is built but switched off (`VERIFY_UNTIL = 0`) until we know how fast the scorer's
+CPU is, because every second our container computes is added to the score. Any doubt
 (a patch we cannot parse or bound, an internal error, an invalid line) makes that
 commit list every test, which can never miss.
 
@@ -86,6 +88,10 @@ For each changed file:
   constants or names changed, the candidates are the tests that entered it. A changed
   module-level or class-level statement changes the module or class body, which every
   importer ran, so its candidates are the importers. A new syntax error: the importers.
+  Two details keep "only lines moved" from looking like a change: constants are
+  compared by type and value (not by their printed form, since two equal sets can
+  print in different orders), and the one constant where Python 3.13 stores a class's
+  own line number (`__firstlineno__`) is ignored when nothing else uses it.
 - **Other files** (fixtures, data): the tests that opened that file.
 - **Added files**: the tests that listed that directory.
 - **Test files added or removed** (`tests/**/test_*.py`, `*_test.py`, `__init__.py`):

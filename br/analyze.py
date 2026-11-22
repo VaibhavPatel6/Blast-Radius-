@@ -19,6 +19,7 @@ The question we answer for each changed file is "which tests could observe this?
 """
 
 import configparser
+import dis
 import tomllib
 import types
 
@@ -55,10 +56,45 @@ def _keyed_children(code: types.CodeType) -> dict[tuple, types.CodeType]:
     return out
 
 
+def _const_key(c):
+    """A comparable, hashable form of a constant that keeps types apart (1, 1.0 and True
+    are equal in Python but are different code) and ignores set ordering."""
+    if isinstance(c, types.CodeType):
+        return ("<code>", c.co_qualname)
+    if isinstance(c, tuple):
+        return ("tuple", tuple(_const_key(x) for x in c))
+    if isinstance(c, frozenset):
+        return ("frozenset", frozenset(_const_key(x) for x in c))
+    if isinstance(c, (float, complex)):
+        return (type(c).__name__, repr(c))  # keeps -0.0 and nan distinct
+    return (type(c).__name__, c)
+
+
+def _firstlineno_const(code: types.CodeType) -> int | None:
+    """Index of the constant a class body stores as __firstlineno__ (Python 3.13+), if that
+    constant is used nowhere else. It is a line number, so a line inserted above the
+    class changes it; masking it keeps "only lines moved" from counting as a change."""
+    if "__firstlineno__" not in code.co_names:
+        return None
+    loads: dict[int, int] = {}
+    target = None
+    previous = None
+    for ins in dis.get_instructions(code):
+        if ins.opname == "LOAD_CONST":
+            loads[ins.arg] = loads.get(ins.arg, 0) + 1
+        if ins.opname == "STORE_NAME" and ins.argval == "__firstlineno__" and previous is not None \
+                and previous.opname == "LOAD_CONST":
+            target = previous.arg
+        previous = ins
+    if target is None or loads.get(target) != 1 or type(code.co_consts[target]) is not int:
+        return None
+    return target
+
+
 def _own_signature(code: types.CodeType) -> tuple:
     """Everything about a code object except line numbers and the bodies of its children."""
-    consts = tuple(("<code>", c.co_qualname) if isinstance(c, types.CodeType) else (type(c).__name__, repr(c))
-                   for c in code.co_consts)
+    masked = _firstlineno_const(code)
+    consts = tuple(("<line>",) if i == masked else _const_key(c) for i, c in enumerate(code.co_consts))
     return tuple(getattr(code, f) for f in _CODE_FIELDS) + (consts,)
 
 

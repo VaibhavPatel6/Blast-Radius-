@@ -4,14 +4,16 @@ For each patch in /data/commits, print one JSON line naming the tests to run and
 how to split them across workers.
 
 Per commit: apply the patch to the pinned tree in memory, find the candidate tests
-(br/analyze.py), and list them. When anything about a patch cannot be bounded or
-an internal error happens, that commit lists every test instead.
+(br/analyze.py), run the cheap ones against the patched code (br/verify.py) and list
+whatever was not seen to pass (br/policy.py). When anything about a patch cannot be
+bounded or an internal error happens, that commit lists every test instead.
 
 Only answer lines go to stdout, and every line is checked before anything is printed.
 """
 
 import json
 import sys
+import time
 from pathlib import Path
 
 DATA = Path("/data")
@@ -19,6 +21,12 @@ APP = Path(__file__).resolve().parent
 PINNED = Path("/opt/sqlglot")  # the pinned sqlglot tree, unpacked at build time
 MAX_WORKERS = 8  # the scorer rejects a line with more than 8 non-empty workers
 WORKER_COST_MS = 2000  # the scorer charges 2 s for every non-empty worker
+# The run gets 3 minutes (4.5 in the final, for 1.5 times as many commits). No new
+# verification starts after VERIFY_UNTIL seconds, and a running one is cut off at
+# VERIFY_HARD_STOP; the remaining commits list their candidates without running them.
+# 0 for now: verification stays off until the server's CPU speed is measured (E5).
+VERIFY_UNTIL = 0
+VERIFY_HARD_STOP = 120
 
 
 def log(message: str) -> None:
@@ -78,24 +86,72 @@ def read_pinned(path: str) -> str | None:
     return f.read_bytes().decode("utf-8")
 
 
-def select(patch_path: Path, tests: list[dict], maps) -> tuple[list[int], str]:
+class Verifier:
+    """Runs candidate tests against a patched view of the tree, within a time budget."""
+
+    def __init__(self, started: float):
+        self.started = started
+        self.preimported = False
+
+    def has_time(self) -> bool:
+        return time.monotonic() - self.started < VERIFY_UNTIL
+
+    def __call__(self, commit: str, changes, tests: list[dict]) -> dict:
+        from br.verify import build_tree, remove_tree, run
+
+        empty = {"passed": [], "failed": [], "unknown": [t["id"] for t in tests], "why": ""}
+        tree = Path("/tmp/br") / commit
+        try:
+            self._preimport(tests)
+            remove_tree(tree)
+            build_tree(tree, changes)
+            return run(tree, tests, self.started + VERIFY_HARD_STOP)
+        except Exception as error:  # verification is an optimization; on error, list
+            log(f"{commit}: verification error {error!r}")
+            return dict(empty, why=repr(error))
+        finally:
+            remove_tree(tree)
+
+    def _preimport(self, tests: list[dict]) -> None:
+        """Import heavy third-party packages once, before forking, if candidates need them.
+        Children are forked from this process, so they inherit them for free."""
+        if self.preimported:
+            return
+        files = {t["file"] for t in tests}
+        for f in files:
+            source = read_pinned(f) or ""
+            if "import duckdb" in source or "import pandas" in source or "import numpy" in source:
+                import duckdb  # noqa: F401
+                import numpy  # noqa: F401
+                import pandas  # noqa: F401
+                import pandas.testing  # noqa: F401
+
+                self.preimported = True
+                return
+
+
+def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> tuple[list[int], str]:
     """Test numbers to list for one patch, and a one-line reason for the log."""
     from br.analyze import Unbounded, candidates
     from br.patch import PatchError, apply
+    from br.policy import decide
 
     everything = [t["number"] for t in tests]
     try:
-        text = patch_path.read_bytes().decode("utf-8")
-        ids, reasons = candidates(apply(text, read_pinned), maps)
+        text = (DATA / "commits" / f"{commit}.patch").read_bytes().decode("utf-8")
+        changes = apply(text, read_pinned)
+        ids, reasons = candidates(changes, maps)
     except (PatchError, Unbounded, UnicodeDecodeError) as error:
         return everything, f"all tests: {error!r}"[:300]
-    known = set(maps.ids)
     # a test our maps never saw could depend on anything: always list it
-    chosen = [t["number"] for t in tests if t["id"] in ids or t["id"] not in known]
-    return chosen, "; ".join(reasons)[:300]
+    unmapped = [t["number"] for t in tests if t["id"] not in known]
+    cands = [t for t in tests if t["id"] in ids]
+    chosen, how = decide(cands, lambda regular: verifier(commit, changes, regular), verifier.has_time())
+    return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400]
 
 
 def main() -> int:
+    started = time.monotonic()
     commits = sorted(p.stem for p in (DATA / "commits").glob("*.patch"))
     try:
         tests = json.loads((DATA / "tests.json").read_text("utf-8"))["tests"]
@@ -110,16 +166,18 @@ def main() -> int:
         from br.maps import Maps
 
         maps = Maps(APP / "maps")
+        mapped = set(maps.ids)
     except Exception as error:
         log(f"cannot load maps ({error!r}); every commit lists every test")
         maps = None
+    verifier = Verifier(started)
 
     lines = []
     for commit in commits:
         workers = everything
         if maps is not None:
             try:
-                chosen, why = select(DATA / "commits" / f"{commit}.patch", tests, maps)
+                chosen, why = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)
                 log(f"{commit}: {len(chosen)} tests | {why}")
             except Exception as error:  # one bad commit must not cost the run
