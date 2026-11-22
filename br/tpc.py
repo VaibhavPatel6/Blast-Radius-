@@ -96,11 +96,26 @@ def _stage_map():
     return _MAPS["tpc_stages.json"]
 
 
+def _execution_record():
+    """maps/tpc_execution.json (tools/covmap/tpc_execution.py): code run and class
+    attributes read during the execution parts along the real worker path
+    (test_executor.mp_execute -> sqlglot.executor.execute), or None."""
+    if "tpc_execution.json" not in _MAPS:
+        try:
+            _MAPS["tpc_execution.json"] = json.loads((_APP / "maps" / "tpc_execution.json").read_text())
+        except (OSError, ValueError):
+            _MAPS["tpc_execution.json"] = None
+    return _MAPS["tpc_execution.json"]
+
+
 def _map(name: str):
     if name not in _MAPS:
         data = json.loads((_APP / "maps" / name).read_text())
         if name == "tpc_exec.json":
             data = {(f[len("/src/"):], q, n) for f, q, n in data}
+            record = _execution_record()
+            if record is not None:  # the real worker path also runs execute()'s own code
+                data |= {tuple(c) for c in record["code"]}
         elif name == "import_time.json":
             data = {tuple(x) for x in data}
         _MAPS[name] = data
@@ -554,8 +569,15 @@ def _reads():
     if "tpc_reads.json" not in _MAPS:
         try:
             data = json.loads((_APP / "maps" / "tpc_reads.json").read_text())
-            _MAPS["tpc_reads.json"] = ({tuple(x) for x in data["instrumented"]},
-                                       {tuple(x) for x in data["execution_reads"]})
+            instrumented = {tuple(x) for x in data["instrumented"]}
+            read = {tuple(x) for x in data["execution_reads"]}
+            record = _execution_record()
+            if record is None or record.get("bypass"):
+                raise ValueError("no real-path record, or executed code that can bypass it")
+            # attributes both recorders instrumented; reads seen by either
+            instrumented &= {tuple(x) for x in record["instrumented"]}
+            read |= {tuple(x) for x in record["execution_reads"]}
+            _MAPS["tpc_reads.json"] = (instrumented, read)
         except (OSError, ValueError, KeyError):
             _MAPS["tpc_reads.json"] = None
     return _MAPS["tpc_reads.json"]
