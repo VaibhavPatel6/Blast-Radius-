@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/core.py b/sqlglot/expressions/core.py
+--- a/sqlglot/expressions/core.py
++++ b/sqlglot/expressions/core.py
+@@ -1853,7 +1853,7 @@
+ 
+ 
+ class Star(Expression):
+-    arg_types = {"except_": False, "replace": False, "rename": False, "ilike": False}
++    arg_types = {'except_': None, 'replace': False, 'rename': False, 'ilike': False}
+ 
+     @property
+     def name(self) -> str:

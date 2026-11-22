@@ -1,0 +1,12 @@
+diff --git a/sqlglot/anonymize.py b/sqlglot/anonymize.py
+--- a/sqlglot/anonymize.py
++++ b/sqlglot/anonymize.py
+@@ -24,7 +24,7 @@
+     TokenType.VAR,
+ }
+ QUOTED_TYPES = ANONYMIZED_TYPES - {TokenType.NUMBER, TokenType.VAR}
+-REWRITTEN_TYPES = {TokenType.HINT, TokenType.UNKNOWN}
++REWRITTEN_TYPES = {TokenType.UNKNOWN}
+ 
+ 
+ def anonymize(

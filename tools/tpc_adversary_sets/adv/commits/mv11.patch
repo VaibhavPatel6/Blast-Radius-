@@ -1,0 +1,25 @@
+diff --git a/sqlglot/anonymize.py b/sqlglot/anonymize.py
+--- a/sqlglot/anonymize.py
++++ b/sqlglot/anonymize.py
+@@ -9,20 +9,7 @@
+ 
+ ALPHABET = string.ascii_lowercase
+ ALPHABET_SIZE = len(ALPHABET)
+-ANONYMIZED_TYPES = {
+-    TokenType.BIT_STRING,
+-    TokenType.BYTE_STRING,
+-    TokenType.HEX_STRING,
+-    TokenType.HEREDOC_STRING,
+-    TokenType.IDENTIFIER,
+-    TokenType.NATIONAL_RAW_STRING,
+-    TokenType.NATIONAL_STRING,
+-    TokenType.NUMBER,
+-    TokenType.RAW_STRING,
+-    TokenType.STRING,
+-    TokenType.UNICODE_STRING,
+-    TokenType.VAR,
+-}
++ANONYMIZED_TYPES = {TokenType.BYTE_STRING, TokenType.HEX_STRING, TokenType.HEREDOC_STRING, TokenType.IDENTIFIER, TokenType.NATIONAL_RAW_STRING, TokenType.NATIONAL_STRING, TokenType.NUMBER, TokenType.RAW_STRING, TokenType.STRING, TokenType.UNICODE_STRING, TokenType.VAR}
+ QUOTED_TYPES = ANONYMIZED_TYPES - {TokenType.NUMBER, TokenType.VAR}
+ REWRITTEN_TYPES = {TokenType.HINT, TokenType.UNKNOWN}
+ 

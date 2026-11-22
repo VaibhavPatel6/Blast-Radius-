@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/bigquery.py b/sqlglot/generators/bigquery.py
+--- a/sqlglot/generators/bigquery.py
++++ b/sqlglot/generators/bigquery.py
+@@ -41,7 +41,7 @@
+ 
+ JSON_EXTRACT_TYPE = t.Union[exp.JSONExtract, exp.JSONExtractScalar, exp.JSONExtractArray]
+ 
+-DQUOTES_ESCAPING_JSON_FUNCTIONS = ("JSON_QUERY", "JSON_VALUE", "JSON_QUERY_ARRAY")
++DQUOTES_ESCAPING_JSON_FUNCTIONS = ('JSON_VALUE', 'JSON_QUERY_ARRAY')
+ 
+ 
+ def _derived_table_values_to_unnest(self: BigQueryGenerator, expression: exp.Values) -> str:

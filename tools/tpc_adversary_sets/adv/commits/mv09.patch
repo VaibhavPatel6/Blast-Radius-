@@ -1,0 +1,23 @@
+diff --git a/sqlglot/optimizer/canonicalize.py b/sqlglot/optimizer/canonicalize.py
+--- a/sqlglot/optimizer/canonicalize.py
++++ b/sqlglot/optimizer/canonicalize.py
+@@ -35,18 +35,7 @@
+     return exp.replace_tree(expression, _canonicalize)
+ 
+ 
+-COERCIBLE_DATE_OPS = (
+-    exp.Add,
+-    exp.Sub,
+-    exp.EQ,
+-    exp.NEQ,
+-    exp.GT,
+-    exp.GTE,
+-    exp.LT,
+-    exp.LTE,
+-    exp.NullSafeEQ,
+-    exp.NullSafeNEQ,
+-)
++COERCIBLE_DATE_OPS = (exp.Sub, exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.NullSafeEQ, exp.NullSafeNEQ)
+ 
+ 
+ # All expression types that any of the canonicalize functions can act on

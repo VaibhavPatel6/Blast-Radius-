@@ -1,0 +1,29 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -2293,24 +2293,7 @@
+     return trunc
+ 
+ 
+-UNIT_TO_TRUNC_FORMAT = {
+-    "CENTURY": "CC",
+-    "YEAR": "YEAR",
+-    "YY": "YEAR",
+-    "YYYY": "YEAR",
+-    "ISOYEAR": "IYYY",
+-    "QUARTER": "Q",
+-    "MONTH": "MONTH",
+-    "MM": "MONTH",
+-    "MON": "MONTH",
+-    "WEEK": "IW",
+-    "WEEK_OF_MONTH": "W",
+-    "WEEK_OF_YEAR": "WW",
+-    "ISOWEEK": "IW",
+-    "DAY": "DD",
+-    "HOUR": "HH",
+-    "MINUTE": "MI",
+-}
++UNIT_TO_TRUNC_FORMAT = {'YEAR': 'YEAR', 'YY': 'YEAR', 'YYYY': 'YEAR', 'ISOYEAR': 'IYYY', 'QUARTER': 'Q', 'MONTH': 'MONTH', 'MM': 'MONTH', 'MON': 'MONTH', 'WEEK': 'IW', 'WEEK_OF_MONTH': 'W', 'WEEK_OF_YEAR': 'WW', 'ISOWEEK': 'IW', 'DAY': 'DD', 'HOUR': 'HH', 'MINUTE': 'MI'}
+ 
+ 
+ @unsupported_args("zone", "century_from_zero")

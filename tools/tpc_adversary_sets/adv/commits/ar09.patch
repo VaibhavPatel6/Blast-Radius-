@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -468,7 +468,7 @@
+     DATA_TYPE_SPECIFIERS_ALLOWED = False
+ 
+     # Whether conditions require booleans WHERE x = 0 vs WHERE x
+-    ENSURE_BOOLS = False
++    ENSURE_BOOLS = True
+ 
+     # Whether the "RECURSIVE" keyword is required when defining recursive CTEs
+     CTE_RECURSIVE_KEYWORD_REQUIRED = True

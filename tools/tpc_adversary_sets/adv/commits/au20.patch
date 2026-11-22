@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -523,7 +523,7 @@
+ 
+     # Whether DISTINCT can be followed by multiple args in an AggFunc. If not, it will be
+     # transpiled into a series of CASE-WHEN-ELSE, ultimately using a tuple conseisting of the args
+-    MULTI_ARG_DISTINCT = True
++    MULTI_ARG_DISTINCT = False
+ 
+     # Whether the JSON extraction operators expect a value of type JSON
+     JSON_TYPE_REQUIRED_FOR_EXTRACTION = False

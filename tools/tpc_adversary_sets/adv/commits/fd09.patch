@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -2980,7 +2980,7 @@
+ def groupconcat_sql(
+     self: Generator,
+     expression: exp.GroupConcat,
+-    func_name: str = "LISTAGG",
++    func_name: str = 'LISTAGy',
+     sep: str | None = ",",
+     within_group: bool = True,
+     on_overflow: bool = False,

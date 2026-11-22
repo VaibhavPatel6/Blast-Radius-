@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/tpc-h/tpc-h.sql b/tests/fixtures/optimizer/tpc-h/tpc-h.sql
+--- a/tests/fixtures/optimizer/tpc-h/tpc-h.sql
++++ b/tests/fixtures/optimizer/tpc-h/tpc-h.sql
+@@ -25,7 +25,7 @@
+ SELECT
+   "lineitem"."l_returnflag" AS "l_returnflag",
+   "lineitem"."l_linestatus" AS "l_linestatus",
+-  SUM("lineitem"."l_quantity") AS "sum_qty",
++  SUM("lineitem"."l_quantity") AS "sum_qtx",
+   SUM("lineitem"."l_extendedprice") AS "sum_base_price",
+   SUM("lineitem"."l_extendedprice" * (
+     1 - "lineitem"."l_discount"

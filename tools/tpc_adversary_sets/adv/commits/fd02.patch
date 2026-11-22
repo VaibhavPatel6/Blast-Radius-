@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -5143,7 +5143,7 @@
+             else result_sql
+         )
+ 
+-    def op_expressions(self, op: str, expression: exp.Expr, flat: bool = False) -> str:
++    def op_expressions(self, op: str, expression: exp.Expr, flat: bool = True) -> str:
+         flat = flat or isinstance(expression.parent, exp.Properties)
+         expressions_sql = self.expressions(expression, flat=flat)
+         if flat:

@@ -1,0 +1,15 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -1083,10 +1083,7 @@
+     EXPRESSION_METADATA = EXPRESSION_METADATA.copy()
+ 
+     # Determines the supported Dialect instance settings
+-    SUPPORTED_SETTINGS = {
+-        "normalization_strategy",
+-        "version",
+-    }
++    SUPPORTED_SETTINGS = {'version'}
+ 
+     @classmethod
+     def get_or_raise(cls, dialect: DialectType) -> Dialect:

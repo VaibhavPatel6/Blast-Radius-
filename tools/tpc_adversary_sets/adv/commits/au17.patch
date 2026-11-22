@@ -1,0 +1,22 @@
+diff --git a/sqlglot/expressions/datatypes.py b/sqlglot/expressions/datatypes.py
+--- a/sqlglot/expressions/datatypes.py
++++ b/sqlglot/expressions/datatypes.py
+@@ -216,17 +216,7 @@
+         DType.MAP,
+     }
+ 
+-    TEXT_TYPES: t.ClassVar[set[DType]] = {
+-        DType.CHAR,
+-        DType.NCHAR,
+-        DType.NVARCHAR,
+-        DType.TEXT,
+-        DType.TINYTEXT,
+-        DType.MEDIUMTEXT,
+-        DType.LONGTEXT,
+-        DType.VARCHAR,
+-        DType.NAME,
+-    }
++    TEXT_TYPES: t.ClassVar[set[DType]] = {DType.NCHAR, DType.NVARCHAR, DType.TEXT, DType.TINYTEXT, DType.MEDIUMTEXT, DType.LONGTEXT, DType.VARCHAR, DType.NAME}
+ 
+     BINARY_TYPES: t.ClassVar[set[DType]] = {
+         DType.BINARY,

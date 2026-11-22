@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -451,7 +451,7 @@
+     NORMALIZATION_STRATEGY = NormalizationStrategy.LOWERCASE
+     """Specifies the strategy according to which identifiers should be normalized."""
+ 
+-    ASCII_ONLY_NORMALIZATION = False
++    ASCII_ONLY_NORMALIZATION = True
+     """Whether identifiers are only normalized with respect to ASCII characters, e.g. `Ä` and
+     `ä` are different identifiers in DuckDB, but the same identifier in Spark."""
+ 
