@@ -115,6 +115,10 @@ _PINNED: dict[str, dict] = {}
 # Queries that read a changed class attribute during execution, collected by
 # unread_differences for the subset run (reset by compare).
 _READ_QUERIES: set = set()
+# Class-edit subset runs (_runnable_read). Off in S9: in compare() the queries found for an
+# attribute are run only for tpc-ds, so a tpc-h difference in an attribute its execution
+# reads would be accepted without a run.
+CLASS_RUNS = False
 _MAPS: dict[str, object] = {}
 
 
@@ -832,7 +836,7 @@ def _runnable_read(key: tuple) -> set | None:
     """The queries whose execution reads class attribute `key`, when a subset run can decide
     a change to it: subset execution is on, the per-query record has the attribute, set-up
     does not read it, and at most RUN_LIMIT queries do. Else None."""
-    if not RUN_LIMIT:
+    if not RUN_LIMIT or not CLASS_RUNS:
         return None
     record = _reads_queries()
     if record is None:
