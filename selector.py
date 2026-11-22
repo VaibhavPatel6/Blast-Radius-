@@ -497,13 +497,21 @@ def _add_exact(workers, durations, exclude, ms):
     """`workers` with unused tests (none in `exclude`) added to the busiest worker so the
     simulated cost rises by exactly `ms`, or None."""
     listed = {n for w in workers for n in w}
-    pick = _fill(durations, [n for n in durations if n not in listed and n not in exclude], ms)
+    occupied = [list(w) for w in workers if w]
+    # with no worker yet, the added tests open one, which itself costs WORKER_COST_MS
+    need = ms if occupied else ms - WORKER_COST_MS
+    if need <= 0:
+        return None
+    pick = _fill(durations, [n for n in durations if n not in listed and n not in exclude], need)
     if pick is None:
         return None
     base = _dcost(workers, durations)
-    new = [list(w) for w in workers]
-    loads = [sum(durations[n] for n in w) if w else -1 for w in new]
-    new[loads.index(max(loads))].extend(pick)
+    if occupied:
+        new = [list(w) for w in workers]
+        loads = [sum(durations[n] for n in w) if w else -1 for w in new]
+        new[loads.index(max(loads))].extend(pick)
+    else:
+        new = [pick]
     return new if _dcost(new, durations) - base == ms else None
 
 
@@ -575,7 +583,11 @@ def main() -> int:
                 chosen, why, extras = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)
                 DIAG4_TPCDS.update(t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID)
-                pre, exclude = diagnostic4(commit, chosen, workers, durations)  # before free fill: exact
+                try:
+                    pre, exclude = diagnostic4(commit, chosen, workers, durations)  # before free fill: exact
+                except Exception as error:  # the diagnostic must never change the answer otherwise
+                    log(f"{commit}: DIAGNOSTIC error {error!r}")
+                    pre, exclude = workers, set()
                 if valid_line(commit, pre, known):
                     workers = pre
                 else:
