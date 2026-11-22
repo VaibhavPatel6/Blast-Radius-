@@ -112,7 +112,12 @@ class _Digest:
         cycles_before = self.cycles
         self.stack.add(key)
         try:
-            if t in (list, tuple):
+            if t in (list, tuple) and v and all(isinstance(x, type) for x in v):
+                # a sequence of classes is often built from a set of classes, in an order
+                # that follows memory addresses: compare its members only
+                names = sorted(f"{x.__module__}.{x.__qualname__}" for x in v)
+                h.update(f"{t.__name__}-of-classes{{{','.join(names)}}};".encode())
+            elif t in (list, tuple):
                 h.update(f"{t.__name__}[{len(v)}](".encode())
                 for x in v:
                     self._walk(x, h)
@@ -168,6 +173,15 @@ class _Digest:
                                 types.MethodDescriptorType, types.MemberDescriptorType,
                                 types.GetSetDescriptorType)):
                 h.update(f"builtin:{getattr(v, '__qualname__', repr(v))};".encode())
+            elif t.__name__ in ("lock", "RLock") and t.__module__ == "_thread":
+                h.update(b"lock;")  # synchronisation, not program state
+            elif t.__module__ == "datetime" or t.__name__ in ("Decimal", "UUID"):
+                h.update(f"{t.__name__}:{v!r};".encode())  # immutable values with exact reprs
+            elif t.__name__ in ("dict_keys", "dict_values", "dict_items"):
+                h.update(f"{t.__name__}(".encode())
+                for x in v:
+                    self._walk(x, h)
+                h.update(b")")
             elif t.__module__ in ("typing", "typing_extensions") or isinstance(v, (types.GenericAlias, types.UnionType)):
                 h.update(f"typing:{v!r};".encode())  # annotations: their printed form is stable
             elif t.__name__ == "_tuplegetter":
@@ -242,6 +256,16 @@ def fingerprint_modules(prefix: str = "sqlglot", only: set[str] | None = None) -
             continue
         if only is not None and mod_name not in only:
             continue
+        # Module-level data (tables, registries, settings). Functions and classes are left
+        # out: their code is compared elsewhere, and rebinding one is a module-level edit,
+        # which never takes this path.
+        data = {}
+        for name, value in list(vars(module).items()):
+            if (name.startswith("__") and name.endswith("__")) or isinstance(
+                    value, (types.ModuleType, type, types.FunctionType, types.BuiltinFunctionType)):
+                continue
+            data[name] = "N:" + digest(value)  # no read map for module globals: any change -> "*"
+        out[f"{mod_name}:<module>"] = {"__kind__": "class", **data}
         for qual, cls in _classes(module):
             attrs = {"__kind__": _kind(cls)}
             for name, value in list(vars(cls).items()):
@@ -286,8 +310,17 @@ def _probe_child(tree: str, modules: list[str], write_fd: int) -> None:
 
         import pytest  # noqa: F401 - sqlglot reads sys.modules for unittest/pytest at import
         importlib.import_module("sqlglot")
-        for name in modules:
-            importlib.import_module(name)
+        if modules == ["*"]:
+            # every sqlglot module, so state that importers copy at their own import
+            # (subclass tables built from a base table) is compared too
+            import pkgutil
+
+            for info in pkgutil.walk_packages([os.path.join(tree, "sqlglot")], "sqlglot."):
+                if not info.name.endswith(".__main__"):  # the command-line entry point
+                    importlib.import_module(info.name)
+        else:
+            for name in modules:
+                importlib.import_module(name)
         data = json.dumps({"ok": True, "fp": fingerprint_modules("sqlglot")}).encode()
     except BaseException as exc:  # noqa: BLE001 - the caller falls back to importers
         data = json.dumps({"ok": False, "why": repr(exc)[-300:]}).encode()
@@ -357,7 +390,7 @@ def changed_attributes(pinned_tree: str, patched_tree: str, modules: list[str], 
     in one of the patched modules; elsewhere it is noise from the import machinery
     (abc caches, dataclass fields) and is ignored.
     """
-    key = (pinned_tree, tuple(modules))
+    key = (pinned_tree, tuple(modules))  # the pinned side depends only on the module list
     old = _PINNED_CACHE.get(key)  # the pinned side depends only on the module list
     if old is None:
         old = _run_probe(pinned_tree, modules, timeout)
@@ -369,7 +402,7 @@ def changed_attributes(pinned_tree: str, patched_tree: str, modules: list[str], 
         return None
     a, b = old["fp"], new["fp"]
     out = {}
-    patched = set(modules)
+    patched = set(modules) if modules != ["*"] else set()
     for key in set(a) | set(b):
         module, qual = key.split(":", 1)
         x, y = a.get(key), b.get(key)

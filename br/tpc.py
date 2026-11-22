@@ -39,7 +39,7 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
 
 
-def _artifacts(benchmark: str, expected: list | None = None) -> list:
+def _artifacts(benchmark: str, expected: list | None = None, only: frozenset | None = None) -> list:
     """Runs in a forked child, inside the tree to judge. With `expected` (the pinned rows,
     inherited through fork), stops at the first query that differs."""
     import pytest  # noqa: F401
@@ -51,8 +51,10 @@ def _artifacts(benchmark: str, expected: list | None = None) -> list:
 
     schema = TPCDS_SCHEMA if benchmark == "tpc-ds" else TPCH_SCHEMA
     out = []
-    for meta, sql, _ in load_sql_fixture_pairs(f"optimizer/{benchmark}/{benchmark}.sql"):
-        row = {}
+    for i, (meta, sql, _) in enumerate(load_sql_fixture_pairs(f"optimizer/{benchmark}/{benchmark}.sql")):
+        if only is not None and i not in only:
+            continue
+        row = {"query": i}
         try:
             tree = parse_one(sql)
             blob = pickle.dumps(tree)
@@ -75,7 +77,7 @@ def _artifacts(benchmark: str, expected: list | None = None) -> list:
     return out
 
 
-def _child(tree: str, benchmark: str, write_fd: int) -> None:
+def _child(tree: str, benchmark: str, write_fd: int, only=None, expected=None) -> None:
     try:
         os.setpgid(0, 0)
         devnull = os.open(os.devnull, os.O_WRONLY)
@@ -83,7 +85,7 @@ def _child(tree: str, benchmark: str, write_fd: int) -> None:
         os.dup2(devnull, 2)
         os.chdir(tree)
         sys.path.insert(0, tree)
-        data = json.dumps({"ok": True, "rows": _artifacts(benchmark, _PINNED.get(benchmark))}).encode()
+        data = json.dumps({"ok": True, "rows": _artifacts(benchmark, expected, only)}).encode()
     except BaseException as exc:  # noqa: BLE001
         data = json.dumps({"ok": False, "why": repr(exc)[-300:]}).encode()
     view = memoryview(data)
@@ -95,7 +97,7 @@ def _child(tree: str, benchmark: str, write_fd: int) -> None:
     os._exit(0)
 
 
-def _run(tree: str, benchmark: str, timeout: float):
+def _run(tree: str, benchmark: str, timeout: float, only=None, expected=None):
     import select
     import signal
     import time
@@ -106,7 +108,7 @@ def _run(tree: str, benchmark: str, timeout: float):
     pid = os.fork()
     if pid == 0:
         os.close(read_fd)
-        _child(tree, benchmark, write_fd)
+        _child(tree, benchmark, write_fd, only, expected)
     os.close(write_fd)
     chunks, end, ok = [], time.monotonic() + timeout, True
     while True:
@@ -133,13 +135,19 @@ def _run(tree: str, benchmark: str, timeout: float):
     return result["rows"] if result.get("ok") else None
 
 
-def same_as_pinned(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float) -> bool:
-    """True only when every query's prepared artifacts equal the pinned commit's."""
+def same_as_pinned(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
+                   only: frozenset | None = None) -> bool:
+    """True only when every query in `only` (all queries when None) prepares to the same
+    artifacts as on the pinned tree. Queries outside `only` never reach the changed code
+    while being prepared (maps/tpc_queries.json, each query recorded in its own process),
+    so they cannot differ. The pinned side is computed once per run for all queries; a
+    query whose result depends on what was prepared before it can only show a spurious
+    difference here, which keeps the test listed."""
     if benchmark not in _PINNED:
         rows = _run(pinned_tree, benchmark, timeout)
         if rows is None:
             return False
         _PINNED[benchmark] = rows
-    rows = _run(patched_tree, benchmark, timeout)
-    return rows is not None and rows == _PINNED[benchmark] and not any("error" in r for r in rows)
-
+    expected = [r for r in _PINNED[benchmark] if only is None or r["query"] in only]
+    rows = _run(patched_tree, benchmark, timeout, only, expected)
+    return rows is not None and rows == expected and not any("error" in r for r in rows)
