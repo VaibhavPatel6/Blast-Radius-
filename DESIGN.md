@@ -179,8 +179,9 @@ When a patch changes only function code, none of which runs during the *executio
 (a map of those code objects, `maps/tpc_exec.json`, is recorded from the pinned commit by
 `tools/covmap/tpcds_phases.py`), and touches no tests, fixtures, executor or planner file,
 then everything the execution part receives is determined by what sqlglot prepares before
-it: the parse tree after the pickle round trip, the optimized tree (its SQL, its full
-structure and the types inferred for every node), and the DuckDB transpilation. We compute
+it: the parse tree after the pickle round trip, the optimized tree (its SQL, its
+pretty-printed SQL, which the executor also renders for every query, its full structure and
+the types inferred for every node), and the DuckDB transpilation. We compute
 those for every query on the pinned tree and on the patched view, in two processes forked
 from the selector; if every query's digests are equal, the test behaves exactly as at the
 pinned commit, where it passes, and it is left out. Any difference, error or timeout keeps

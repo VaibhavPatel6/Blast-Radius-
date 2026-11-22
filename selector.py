@@ -228,10 +228,13 @@ def answer_cost(numbers: list[int], durations: dict[int, int]) -> int:
 
 
 _TPC_EXECUTION: set | None = None
+_IMPORT_TIME: set | None = None
+# A function entered by nearly every test run alone is almost certainly run at import.
+IMPORT_LIKE_ENTRANTS = 1500
 
 
 def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
-               class_edits: list, verifier, allowed: bool):
+               class_edits: list, verifier, allowed: bool, maps=None):
     """Drop the TPC executor tests when what sqlglot prepares before execution is unchanged
     (br/tpc.py). Only for patches that change function code alone, none of it run during
     execution, and touch nothing else those tests depend on."""
@@ -252,6 +255,15 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
         _TPC_EXECUTION = {(f[len("/src/"):], q, n) for f, q, n in json.loads((APP / "maps" / "tpc_exec.json").read_text())}
     if any((p, q, n) in _TPC_EXECUTION for p, q, n, _ in changed_objects):
         return chosen, " | tpc: kept (changed code runs during execution)"
+    # Code that runs at import (metaclasses, factories called in class bodies) can change
+    # the tables the executor reads without changing any prepared query: refuse it.
+    global _IMPORT_TIME
+    if _IMPORT_TIME is None:
+        _IMPORT_TIME = {tuple(x) for x in json.loads((APP / "maps" / "import_time.json").read_text())}
+    if any((p, q, n) in _IMPORT_TIME for p, q, n, _ in changed_objects):
+        return chosen, " | tpc: kept (changed code runs at import)"
+    if maps is None or any(len(maps.entered(p, q, n)) > IMPORT_LIKE_ENTRANTS for p, q, n, _ in changed_objects):
+        return chosen, " | tpc: kept (changed code entered by nearly every test)"
     tree = Path("/tmp/br") / (commit + "-tpc")
     dropped = []
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -336,7 +348,7 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     by_id = {t["id"]: t for t in tests}
     chosen, how_run = run_cheap_heavy(commit, changes, chosen, tests, verifier, can_verify and not data_only)
     how += how_run
-    chosen, how_tpc = decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier, can_verify)
+    chosen, how_tpc = decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier, can_verify, maps)
     how += how_tpc
     extras = sorted((by_id[i] for i in wide if i in by_id), key=lambda t: (t["seconds"], t["number"]))
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]

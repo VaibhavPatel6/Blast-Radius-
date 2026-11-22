@@ -62,7 +62,10 @@ def _artifacts(benchmark: str, expected: list | None = None) -> list:
             if meta.get("execute"):
                 optimized = optimize(loaded, ensure_schema(schema), leave_tables_isolated=True)
                 types = [(type(n).__name__, n.type.sql() if n.type else None) for n in optimized.walk()]
-                row["optimized"] = _sha(optimized.sql() + "\n" + repr(optimized) + "\n" + repr(types))
+                # the executor also renders the optimized tree in pretty mode (a debug log
+                # argument, evaluated for every query), so that output is compared too
+                pretty = optimized.sql(pretty=True)
+                row["optimized"] = _sha(optimized.sql() + "\n" + pretty + "\n" + repr(optimized) + "\n" + repr(types))
                 row["duckdb"] = _sha(transpile(sql, write="duckdb")[0])
         except Exception as error:  # noqa: BLE001 - an error is an outcome to compare too
             row["error"] = type(error).__name__ + ":" + str(error)[:200]
