@@ -1,0 +1,36 @@
+diff --git a/sqlglot/optimizer/pushdown_projections.py b/sqlglot/optimizer/pushdown_projections.py
+--- a/sqlglot/optimizer/pushdown_projections.py
++++ b/sqlglot/optimizer/pushdown_projections.py
+@@ -453,7 +453,7 @@
+             continue
+ 
+         expression = scope.expression
+-        if not isinstance(expression, exp.Select):
++        if isinstance(expression, exp.Select):
+             continue
+ 
+         subset = [
+diff --git a/tests/dialects/test_duckdb.py b/tests/dialects/test_duckdb.py
+--- a/tests/dialects/test_duckdb.py
++++ b/tests/dialects/test_duckdb.py
+@@ -52,7 +52,7 @@
+                 "sqlite": "FORMAT('%04d-%.2f-%%', 1, 1.25)",
+             },
+         )
+-        self.validate_identity("SELECT PRINTF(fmt, 1, 'a') FROM (VALUES ('%d-%s')) AS t(fmt)")
++        self.validate_identity("SELECT PRINTF(fmt, 2, 'a') FROM (VALUES ('%d-%s')) AS t(fmt)")
+ 
+         for fmt, expected in (
+             ("%s", "{}"),
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -28,7 +28,7 @@
+   SELECT
+     "store_returns"."sr_customer_sk" AS "ctr_customer_sk",
+     "store_returns"."sr_store_sk" AS "ctr_store_sk",
+-    SUM("store_returns"."sr_return_amt") AS "ctr_total_return"
++    SUM("store_returns"."sr_return_amt") AS "ctr_total_returns"
+   FROM "store_returns" AS "store_returns"
+   JOIN "date_dim" AS "date_dim"
+     ON "date_dim"."d_date_sk" = "store_returns"."sr_returned_date_sk"

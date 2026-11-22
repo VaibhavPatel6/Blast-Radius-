@@ -86,6 +86,10 @@ _LOCK_TYPES = (type(__import__("threading").RLock()), type(__import__("threading
 # pinned tree (no test can depend on it): compared as sets.
 _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 
+# Set aside Python files under tests/ that the TPC tests never import or run
+# (`_test_file_refusal`). False keeps every tests/ path refused as before.
+TEST_FILES = True
+
 # Refuse function edits that could change state shared with the tests that run before
 # the TPC tests in the suite (`mutation_refusal`).
 MUTATION_RULE = True
@@ -889,7 +893,43 @@ def decide_fixture(changes, chosen: list[int], tests: list[dict], pinned_tree: s
     return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] (fixture: only expected outputs or comments changed)"
 
 
-def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | None]:
+# Test files the TPC tests import or run at import: never set aside.
+_TPC_TEST_FILES = {"tests/test_executor.py", "tests/helpers.py", "tests/__init__.py"}
+
+
+def _test_file_refusal(ch, changed_objects, class_edits, maps) -> str | None:
+    """Why a changed Python file under tests/ cannot be set aside, or None.
+
+    pytest imports every collected test module into the process that runs the TPC tests,
+    and runs other tests' functions there first. So a test file is set aside only when it
+    is edited in place, the TPC tests neither import it nor run it at import (helpers,
+    test_executor, conftest, package inits), every changed code object is a function no
+    TPC test enters (maps), nothing changed in a class or module body (that code runs at
+    import, in the same process), and its changed functions pass the shared-state rule
+    (`mutation_refusal`: they write nothing and differ from the pinned code in no name,
+    store or copy-like keyword)."""
+    path = ch.old_path
+    if path is None or ch.new_path != path:
+        return f"{ch.new_path or path} added, removed or renamed"
+    if path in _TPC_TEST_FILES or path.rsplit("/", 1)[-1] in ("conftest.py", "__init__.py"):
+        return f"{path} is imported or run by the TPC tests"
+    if any(e["path"] == path for e in class_edits):
+        return f"{path}: a class body changed"
+    tpc_ids = set(TPC_TESTS)
+    for p, q, n, kind in changed_objects:
+        if p != path:
+            continue
+        if kind != "function":
+            return f"{path}: {kind} code changed (runs at import)"
+        if maps.entered(p, q, n) & tpc_ids:
+            return f"{path}: {q} is run by the TPC tests"
+    why = mutation_refusal([ch])
+    if why:
+        return f"{path}: {why}"
+    return None
+
+
+def set_aside(changes, pinned_tree: str, maps, changed_objects=(), class_edits=()) -> tuple[list, list[str], str | None]:
     """Split a patch into the changes the TPC executor tests can see and those they cannot:
     (relevant changes, notes on what was set aside, why to keep the tests or None).
 
@@ -904,6 +944,12 @@ def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | N
     for ch in changes:
         path = ch.new_path or ch.old_path or ""
         if path.endswith(".py") or (ch.old_path or "").endswith(".py"):
+            if maps is not None and TEST_FILES and path.startswith("tests/") and (ch.old_path or "").startswith("tests/"):
+                why = _test_file_refusal(ch, changed_objects, class_edits, maps)
+                if why:
+                    return changes, notes, why
+                notes.append(f"{path}: test code the TPC tests never run")
+                continue
             relevant.append(ch)
             continue
         if getattr(ch, "mode_change", False):
@@ -938,6 +984,51 @@ def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | N
     return relevant, notes, None
 
 
+def _class_attributes(text: str) -> dict:
+    """{(class qualname, name): source of the value} for single-name assignments in class
+    bodies."""
+    import ast
+
+    out = {}
+
+    def walk(body, prefix):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                qual = f"{prefix}{node.name}"
+                for item in node.body:
+                    if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+                        out[(qual, item.targets[0].id)] = ast.dump(item.value)
+                    elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                        out[(qual, item.target.id)] = ast.dump(item.value) if item.value else None
+                walk(node.body, qual + ".")
+
+    walk(ast.parse(text).body, "")
+    return out
+
+
+def early_class_refusal(changes) -> str | None:
+    """Before running anything: a class attribute assigned in a changed class body whose
+    value changed and which the execution record says the TPC tests read while executing.
+    The import-state comparison would keep the test anyway (unless a class-creation hook
+    overwrites the value), so this only saves the cost of the comparison."""
+    reads = _reads()
+    if reads is None:
+        return None
+    read = reads[1]
+    for ch in changes:
+        if ch.old_path is None or ch.new_path != ch.old_path or not ch.old_path.endswith(".py"):
+            continue
+        try:
+            old, new = _class_attributes(ch.old_text), _class_attributes(ch.new_text)
+        except SyntaxError:
+            return None
+        module = ch.old_path[:-3].replace("/", ".").removesuffix(".__init__")
+        for key in set(old) | set(new):
+            if old.get(key) != new.get(key) and (module, *key) in read:
+                return f"{key[0]}.{key[1]} changed and is read during execution"
+    return None
+
+
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, pinned_tree: str, timeout: float, log=lambda message: None,
            work_root: str = "/tmp/br", saving_ms=None, maps=None) -> tuple[list[int], str]:
@@ -960,9 +1051,12 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     if fixture is not None and maps is None:
         return fixture
     all_changes = changes
-    changes, aside, why_keep = set_aside(changes, pinned_tree, maps)
+    changes, aside, why_keep = set_aside(changes, pinned_tree, maps, changed_objects, class_edits)
     if why_keep:
         return chosen, f" | tpc: kept ({why_keep})"
+    kept_paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
+    changed_objects = [c for c in changed_objects if c[0] in kept_paths]
+    class_edits = [e for e in class_edits if e["path"] in kept_paths]
     if not changes:
         if any("expected outputs" in n for n in aside):
             names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in present)
@@ -977,6 +1071,8 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     class_level = bool(class_edits) or any(kind != "function" for _, _, _, kind in changed_objects)
     if class_level and (not CLASS_LEVEL or _reads() is None):
         return chosen, " | tpc: kept (class or module code changed)"
+    if class_level and (why_early := early_class_refusal(changes)):
+        return chosen, f" | tpc: kept ({why_early})"
     if any(ch.old_path != ch.new_path for ch in changes):
         return chosen, " | tpc: kept (file added, removed or renamed)"
     execution = _map("tpc_exec.json")

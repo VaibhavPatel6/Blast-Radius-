@@ -1,0 +1,24 @@
+diff --git a/sqlglot/optimizer/optimizer.py b/sqlglot/optimizer/optimizer.py
+--- a/sqlglot/optimizer/optimizer.py
++++ b/sqlglot/optimizer/optimizer.py
+@@ -101,7 +101,7 @@
+         "dialect": dialect,
+         "sql": sql,
+         "isolate_tables": True,  # needed for other optimizations to perform well
+-        "quote_identifiers": False,
++        "quote_identifiers": True,
+         **kwargs,
+     }
+ 
+diff --git a/tests/test_optimizer.py b/tests/test_optimizer.py
+--- a/tests/test_optimizer.py
++++ b/tests/test_optimizer.py
+@@ -51,7 +51,7 @@
+     return canonicalize_internal_names(qualify(expression, **qualify_kwargs))
+ 
+ 
+-def qualify_columns(expression, validate_qualify_columns=True, **kwargs):
++def qualify_columns(expression, validate_qualify_columns=False, **kwargs):
+     expression = optimizer.qualify.qualify(
+         expression,
+         validate_qualify_columns=validate_qualify_columns,

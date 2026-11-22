@@ -1,0 +1,12 @@
+{
+ "tf00": "passing code + test string edit + expected output",
+ "tf01": "failing code + test string edit + expected output",
+ "tf02": "test string edit + expected output, no code",
+ "tf03": "passing code + edit in tests/test_executor.py (another test)",
+ "tf04": "passing code + tests/helpers.py edit",
+ "tf05": "passing code + test that pops a dialect table",
+ "tf06": "passing code + test that no longer undoes its registration",
+ "tf07": "passing code + module-level edit in tests/test_optimizer.py",
+ "tf08": "passing code + whitespace in a test function call (test_optimizer)",
+ "tf09": "test string edit alone"
+}

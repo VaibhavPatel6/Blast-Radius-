@@ -1,0 +1,12 @@
+diff --git a/tests/dialects/test_duckdb.py b/tests/dialects/test_duckdb.py
+--- a/tests/dialects/test_duckdb.py
++++ b/tests/dialects/test_duckdb.py
+@@ -52,7 +52,7 @@
+                 "sqlite": "FORMAT('%04d-%.2f-%%', 1, 1.25)",
+             },
+         )
+-        self.validate_identity("SELECT PRINTF(fmt, 1, 'a') FROM (VALUES ('%d-%s')) AS t(fmt)")
++        self.validate_identity("SELECT PRINTF(fmt, 2, 'a') FROM (VALUES ('%d-%s')) AS t(fmt)")
+ 
+         for fmt, expected in (
+             ("%s", "{}"),
