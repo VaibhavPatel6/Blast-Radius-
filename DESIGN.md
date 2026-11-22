@@ -3,6 +3,11 @@
 How this entry works, one section per component, in plain language. Each section
 says what the component does and why it is safe.
 
+**The scored final entry is S10, commit `8715ffb`** (practice 186.0 s: 177.242 s simulated,
+8.8 s CPU, 0 missed). This document describes that commit. `origin/main` is one merge
+further, at S11 (`fe93df9`), which differs only in how the TPC check prepares its queries
+(see the end of the TPC section); S11 was gated but not submitted.
+
 ## Image (`Dockerfile`, `build/fetch_sqlglot.py`)
 
 The image starts from the kit's pinned Python image, installs the exact packages in
@@ -215,6 +220,33 @@ evidence that they run exactly as at the pinned commit, where they pass:
   settings unchanged (expected outputs, comments) drops both tests.
 - **Worth it.** The comparison runs only when its expected CPU is below the simulated
   seconds leaving the tests out would save.
+- **Non-Python files.** The selector passes the maps to the check, so a non-Python
+  change the TPC tests never open or list (added or removed files charged to the nearest
+  existing directory, as the analyzer does) is set aside and the rest decided as above.
+  A TPC fixture edit keeps the tests when a changed query's text equals a query of the
+  other benchmark (the test caches DuckDB answers by SQL text).
+- **Subset execution** (`RUN_LIMIT = 10`). When at most ten TPC-DS queries prepare
+  differently, or a fixture edit changes queries, or a function edit under the executor or
+  the planner reaches at most ten queries (`maps/tpc_exec_queries.json`), those queries are
+  executed the way the test executes them, and the tests are dropped only if all pass.
+  Class-edit subset runs are built but off (`CLASS_RUNS = False`): their TPC-H side
+  accepted a difference without running anything.
+- **Constants and containers.** The shared-state rule also refuses a changed set of
+  constant types or a changed count of container-building instructions in a changed
+  function.
+- **Module loading** (`lazy_loading_refusal` in `selector.py`). The check prepares queries
+  in a child that has imported every sqlglot module, while the real test loads dialects
+  lazily. A one-token edit in `_Dialect.get` (`not in` to `in`, or `is`, or
+  `_try_load(default)`) broke the real test while both cold sides agreed. So the TPC tests
+  are kept for any change to `_Dialect` methods or `get_or_raise`, to
+  `sqlglot/dialects/__init__.py`, `sqlglot/optimizer/__init__.py`, `sqlglot/serde.py` or
+  `sqlglot/__init__.py`, or to a function that imports modules or names the loading
+  machinery (`import_module`, `_try_load`, `_classes`, `entry_points` and others).
+  S11 additionally prepares the queries after only the test module's own imports, so
+  dialects load lazily as in the test, and digests the import state in a separate child
+  that imports everything.
+- **Known residue.** The check and the subset runs use a fixed hash seed; the real test
+  does not. No executed query was found whose result depends on it.
 
 `test_generator_memory` (6.7 s) is simply run in a child when it is a candidate and
 leaving it out would save more than about 2.5 s; a pass drops it.
