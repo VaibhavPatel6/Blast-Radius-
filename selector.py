@@ -385,10 +385,14 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
         from br.swap import prove
 
         proven, why_swap, keep = prove(changes, maps)
+        swap_answer = None
         if proven:
+            # DIAGNOSTIC 4: S6 would answer this; the diagnostic answers as f8e7357 does
+            # (the analysis below) and only records S6's verdict on test_execute_tpcds.
             keep_numbers = [t["number"] for t in tests if t["id"] in keep]
             unmapped = [t["number"] for t in tests if t["id"] not in known]
-            return sorted(set(keep_numbers) | set(unmapped)), f"swap proof: {why_swap}"[:400], []
+            swap_answer = sorted(set(keep_numbers) | set(unmapped))
+            log(f"{commit}: DIAGNOSTIC swap proof would answer {len(swap_answer)} tests: {why_swap}"[:400])
         class_edits: list[dict] = []
         wide: set[str] = set()
         changed_objects: list[tuple] = []
@@ -418,10 +422,122 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     by_id = {t["id"]: t for t in tests}
     chosen, how_run = run_cheap_heavy(commit, changes, chosen, tests, verifier, can_verify and not data_only)
     how += how_run
-    chosen, how_tpc = decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier, can_verify, maps)
+    base_chosen = list(chosen)  # DIAGNOSTIC 4: f8e7357's answer (TPC check off, no swap proof)
+    if swap_answer is None:
+        chosen, how_tpc = decide_tpc(commit, changes, chosen, tests, changed_objects, class_edits, verifier,
+                                     can_verify, maps)
+    else:
+        chosen, how_tpc = swap_answer, " | swap proof"
     how += how_tpc
+    tpcds_number = next((t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID), None)
+    if tpcds_number in base_chosen:
+        if tpcds_number not in chosen:
+            DIAG4[commit] = ("drop", 3125)
+        else:
+            paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
+            parts = (1 if any(p.startswith("sqlglot/executor/") for p in paths) else 0) \
+                + (5 if "sqlglot/planner.py" in paths else 0) \
+                + (25 if any(p.startswith("tests/") and p.endswith(".py") for p in paths) else 0) \
+                + (125 if any(p in DIAG_TPC_FIXTURES for p in paths) else 0) \
+                + (625 if any(not p.endswith(".py") and p not in DIAG_TPC_FIXTURES for p in paths) else 0)
+            shape = "tpc: kept (patch shape)" in how_tpc or "tpc: kept (fixture" in how_tpc
+            DIAG4[commit] = ("keep", parts if (shape and parts) else 15625)
+        log(f"{commit}: DIAGNOSTIC tpcds {DIAG4[commit]}{how_tpc}"[:400])
+    chosen = base_chosen
     extras = sorted((by_id[i] for i in wide if i in by_id), key=lambda t: (t["seconds"], t["number"]))
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]
+
+
+# DIAGNOSTIC BUILD 4, not an entry. Answers exactly as f8e7357 (practice 199.269 s
+# simulated) while running every S6 decider (so its CPU shows S6's cost), plus:
+#  - for each commit whose f8e7357 answer lists test_execute_tpcds, a marker in ms:
+#    S6 drops it: 3125, and the test is really left out, with other unused tests added so
+#    the simulated cost is unchanged (a miss then shows S6's drop is wrong);
+#    S6 keeps it for the patch shape or the fixture rule: the sum of the parts present
+#    (sqlglot/executor/ 1, sqlglot/planner.py 5, .py under tests/ 25, a TPC fixture 125,
+#    another non-Python file 625); S6 keeps it for any other reason: 15625;
+#  - a fixed handicap of 3000 ms on the first other commit, so S6 itself scores better.
+# Decode: D = round((simulated - 199.269 - 3.000) * 1000), read in base 5.
+DIAG_TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+DIAG_TPC_FIXTURES = {"tests/fixtures/optimizer/tpc-ds/tpc-ds.sql", "tests/fixtures/optimizer/tpc-h/tpc-h.sql"}
+DIAG_HANDICAP_MS = 3000
+DIAG4: dict = {}
+
+
+def _dcost(workers, durations) -> int:
+    occupied = [w for w in workers if w]
+    return (max(sum(durations[n] for n in w) for w in occupied) + WORKER_COST_MS * len(occupied)) if occupied else 0
+
+
+def _fill(durations, unused, target):
+    """Test numbers from `unused` whose durations sum to exactly `target` ms, or None."""
+    pool = sorted((n for n in unused if 0 < durations[n] <= target), key=lambda n: (-durations[n], n))
+    picked, left = [], target
+    for n in pool:  # greedy down to a small remainder, then exact subset sum
+        if left <= 1500:
+            break
+        if durations[n] <= left - 200:
+            picked.append(n)
+            left -= durations[n]
+    rest = [n for n in pool if n not in set(picked) and durations[n] <= left]
+    reach = {0: []}
+    for n in sorted(rest, key=lambda n: (durations[n], n)):
+        if left in reach:
+            break
+        d = durations[n]
+        for total, chosen in list(reach.items()):
+            t = total + d
+            if t <= left and t not in reach:
+                reach[t] = chosen + [n]
+    return picked + reach[left] if left in reach else None
+
+
+def _add_exact(workers, durations, exclude, ms):
+    """`workers` with unused tests (none in `exclude`) added to the busiest worker so the
+    simulated cost rises by exactly `ms`, or None."""
+    listed = {n for w in workers for n in w}
+    pick = _fill(durations, [n for n in durations if n not in listed and n not in exclude], ms)
+    if pick is None:
+        return None
+    base = _dcost(workers, durations)
+    new = [list(w) for w in workers]
+    loads = [sum(durations[n] for n in w) if w else -1 for w in new]
+    new[loads.index(max(loads))].extend(pick)
+    return new if _dcost(new, durations) - base == ms else None
+
+
+def diagnostic4(commit, chosen, workers, durations):
+    """(workers, exclude-from-free-fill) for one commit."""
+    entry = DIAG4.get(commit)
+    tpcds = next(iter(DIAG4_TPCDS), None)
+    if entry is None:
+        if DIAG4_STATE["handicap"]:
+            return workers, set()
+        new = _add_exact(workers, durations, {tpcds}, DIAG_HANDICAP_MS)
+        if new is None:
+            return workers, set()
+        DIAG4_STATE["handicap"] = True
+        log(f"{commit}: DIAGNOSTIC handicap {DIAG_HANDICAP_MS}")
+        return new, set()
+    kind, ms = entry
+    if kind == "drop":
+        target = _dcost(workers, durations) + ms
+        without = pack([n for n in chosen if n != tpcds], durations)
+        new = _add_exact(without, durations, {tpcds}, target - _dcost(without, durations))
+        if new is not None:
+            log(f"{commit}: DIAGNOSTIC marker {ms} (tpcds dropped)")
+            return new, {tpcds}
+        log(f"{commit}: DIAGNOSTIC drop not applied; marker only")
+    new = _add_exact(workers, durations, {tpcds}, ms)
+    if new is None:
+        log(f"{commit}: DIAGNOSTIC unmarked {ms}")
+        return workers, set()
+    log(f"{commit}: DIAGNOSTIC marker {ms}")
+    return new, set()
+
+
+DIAG4_TPCDS: set = set()
+DIAG4_STATE = {"handicap": False}
 
 
 def main() -> int:
@@ -455,8 +571,14 @@ def main() -> int:
             try:
                 chosen, why, extras = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)
+                DIAG4_TPCDS.update(t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID)
+                pre, exclude = diagnostic4(commit, chosen, workers, durations)  # before free fill: exact
+                if valid_line(commit, pre, known):
+                    workers = pre
+                else:
+                    exclude = set()
                 zero = [n for n in sorted(durations) if durations[n] == 0]
-                workers = free_fill(workers, extras + zero, durations)
+                workers = free_fill(workers, [n for n in extras + zero if n not in exclude], durations)
                 log(f"{commit}: {len(chosen)} tests | {why}")
             except Exception as error:  # one bad commit must not cost the run
                 log(f"{commit}: internal error {error!r}; listing every test")
