@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -1868,7 +1868,7 @@
+             return f"{char} CHARACTER SET {self.sql(expression, 'kind')}"
+         else:
+             type_sql = (
+-                self.TYPE_MAPPING.get(type_value, type_value.value)
++                self.TYPE_MAPPING.pop(type_value, type_value.value)
+                 if isinstance(type_value, exp.DType)
+                 else type_value
+             )

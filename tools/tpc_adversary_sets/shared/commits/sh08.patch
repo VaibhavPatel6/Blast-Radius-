@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/snowflake.py b/sqlglot/dialects/snowflake.py
+--- a/sqlglot/dialects/snowflake.py
++++ b/sqlglot/dialects/snowflake.py
+@@ -49,7 +49,7 @@
+         exp.StrtokSplitToTable: ("seq", "index", "value"),
+     }
+ 
+-    EXPRESSION_METADATA = EXPRESSION_METADATA.copy()
++    EXPRESSION_METADATA = EXPRESSION_METADATA
+ 
+     # https://docs.snowflake.com/en/en/sql-reference/functions/initcap
+     INITCAP_DEFAULT_DELIMITER_CHARS = ' \t\n\r\f\v!?@"^#$&~_,.:;+\\-*%/|\\[\\](){}<>'

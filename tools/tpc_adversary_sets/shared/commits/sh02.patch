@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -7643,7 +7643,7 @@
+ 
+         self._advance(2)
+ 
+-        parser = self.FUNCTION_PARSERS.get(upper)
++        parser = self.FUNCTION_PARSERS.pop(upper)
+         if parser and not anonymous:
+             result = parser(self)
+         else:

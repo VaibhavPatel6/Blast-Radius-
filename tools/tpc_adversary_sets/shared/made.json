@@ -1,0 +1,11 @@
+{
+ "sh00": "reviewer's case: TRUNC_FORMAT_TO_UNIT get->pop",
+ "sh01": "exp.EXPR_CLASSES get->pop",
+ "sh02": "Parser.FUNCTION_PARSERS get->pop",
+ "sh03": "Generator.TYPE_MAPPING get->pop",
+ "sh04": "dialects MODULE_BY_ATTRIBUTE get->pop",
+ "sh05": "transforms TRANSFORMS get->pop",
+ "sh06": "TypeAnnotator.COERCES_TO get->pop",
+ "sh07": "Dialect.COLUMN_ALIAS_PRECEDENCE get->pop",
+ "sh08": "class-body copy of a shared table removed (snowflake)"
+}
