@@ -39,6 +39,16 @@ patched tree in two processes forked from the selector:
 If 1 and 2 are equal the workers receive identical inputs, read identical state and run
 unchanged code, so the test behaves as on the pinned commit, where it passes.
 
+The comparison runs in cold processes, while in the suite test_execute_tpcds runs after
+about a thousand other tests. A changed function that writes state those tests share,
+for inputs the TPC queries never give, would leave that state changed for the TPC test,
+and no cold comparison can see it. `mutation_refusal` therefore refuses every function
+edit whose changed code writes at all, or whose names, writes or copy-like keyword
+values differ from the pinned code. Not covered, and accepted (planning session,
+2026-11-22): an edit that writes nothing itself but hands an unchanged function a
+different object, which that unchanged function then mutates, for inputs the TPC
+queries never give.
+
 The pinned side is computed once per run per benchmark, after pytest is imported (sqlglot
 checks for a test framework at import). It cannot be made at image build: the parse of
 TPC-DS query 48 depends on what earlier parses left in the process and on memory-address
@@ -75,6 +85,10 @@ _LOCK_TYPES = (type(__import__("threading").RLock()), type(__import__("threading
 # Tuples sqlglot builds from a set, so their order follows memory addresses even on the
 # pinned tree (no test can depend on it): compared as sets.
 _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
+
+# Set aside Python files under tests/ that the TPC tests never import or run
+# (`_test_file_refusal`). False keeps every tests/ path refused as before.
+TEST_FILES = True
 
 # Refuse function edits that could change state shared with the tests that run before
 # the TPC tests in the suite (`mutation_refusal`).
@@ -171,28 +185,56 @@ def code_renames(changes) -> dict[str, str] | None:
 _STORES = {"STORE_GLOBAL", "DELETE_GLOBAL", "STORE_ATTR", "DELETE_ATTR", "STORE_SUBSCR", "DELETE_SUBSCR",
            "STORE_SLICE", "DELETE_SLICE"}
 _COPY_WORDS = {"copy", "inplace", "deep", "mutate"}
+# The strict part of the shared-state rule: a changed function (pinned or patched) that
+# writes anywhere, or calls a method that changes its receiver, is refused, so that a
+# flipped condition in front of an existing write cannot get through.
+_STRICT_STORES = {"STORE_ATTR", "STORE_SUBSCR", "DELETE_ATTR", "DELETE_SUBSCR", "STORE_GLOBAL", "DELETE_GLOBAL"}
+_MUTATING_METHODS = {"pop", "popitem", "append", "extend", "insert", "remove", "clear", "update", "setdefault",
+                     "add", "discard", "sort", "reverse"}
 
 
 def _effects(code: types.CodeType):
     """What a code object's own instructions could do to shared state: the names it uses
     (attribute and global names: get versus pop, copy, dict, update), its store and delete
     instructions, its in-place operators, and its constants when a call passes a keyword
-    such as copy= (copy=True -> False makes an unchanged callee change its argument)."""
+    such as copy= (copy=True -> False makes an unchanged callee change its argument): the
+    value given to each such keyword, or all constants when that value is not a plain load."""
     import collections
     import dis
 
     stores, inplace = collections.Counter(), collections.Counter()
-    copy_keywords = False
-    for ins in dis.get_instructions(code):
+    copy_values: list = []  # what each copy-like keyword argument is given
+    unclear = False
+    instructions = list(dis.get_instructions(code))
+    for k, ins in enumerate(instructions):
         if ins.opname in _STORES:
             stores[(ins.opname, ins.argrepr)] += 1
         elif ins.opname == "BINARY_OP" and ins.argrepr.endswith("=") and ins.argrepr != "==":
             inplace[ins.argrepr] += 1
-        elif ins.opname == "LOAD_CONST" and isinstance(ins.argval, tuple) \
+        elif ins.opname == "LOAD_CONST" and isinstance(ins.argval, tuple) and ins.argval \
                 and all(isinstance(x, str) for x in ins.argval) and _COPY_WORDS & set(ins.argval):
-            copy_keywords = True
-    consts = [c for c in code.co_consts if not isinstance(c, types.CodeType)] if copy_keywords else None
-    return collections.Counter(code.co_names), stores, inplace, consts
+            # keyword names of a call: the values are the instructions just before, one
+            # push each when they are plain loads
+            names = ins.argval
+            values: list = []  # (opname, value) per pushed value, nearest first
+            j = k - 1
+            while len(values) < len(names) and j >= 0:
+                prev = instructions[j]
+                if prev.opname == "LOAD_FAST_LOAD_FAST" and isinstance(prev.argval, tuple):
+                    values.extend(("LOAD_FAST", v) for v in reversed(prev.argval))
+                elif prev.opname in ("LOAD_CONST", "LOAD_FAST", "LOAD_FAST_CHECK", "LOAD_DEREF", "LOAD_SMALL_INT"):
+                    values.append((prev.opname, prev.argval))
+                else:
+                    break
+                j -= 1
+            if len(values) >= len(names):
+                for name, (opname, value) in zip(reversed(names), values):
+                    if name in _COPY_WORDS:
+                        copy_values.append((name, opname, repr(value)))
+            else:
+                unclear = True
+    consts = [c for c in code.co_consts if not isinstance(c, types.CodeType)] if unclear else None
+    return collections.Counter(code.co_names), stores, inplace, (copy_values, consts)
 
 
 def mutation_refusal(changes) -> str | None:
@@ -203,9 +245,15 @@ def mutation_refusal(changes) -> str | None:
     about a thousand other tests, and a patched function that writes shared state for
     their inputs (a dialect the TPC queries never use) leaves it changed for the TPC test.
     So a changed function (not a class or module body, whose effect is the import state)
-    is refused when, compared with the pinned code, it uses a different set of names, has
-    a store, delete or in-place operation the pinned code does not have, changes a
-    constant while passing a copy-like keyword, or gains or loses a nested function."""
+    is refused when either version of it stores to or deletes an attribute, item or global,
+    or calls pop, popitem, append, extend, insert, remove, clear, update, setdefault, add,
+    discard, sort or reverse (on 93 patches the gates drop a TPC test for, this strict part
+    keeps 88); or when, compared with the pinned code, it uses a different set of names, has
+    a store, delete or in-place operation the pinned code does not have, gives a copy-like
+    keyword (copy, inplace, deep, mutate) another value, or gains or loses a nested
+    function."""
+    import dis
+
     from br import analyze
 
     for ch in changes:
@@ -226,6 +274,13 @@ def mutation_refusal(changes) -> str | None:
             todo.extend((old_kids[k], new_kids[k]) for k in old_kids)
             if not o.co_flags & 0x1:  # CO_OPTIMIZED: a function; module and class bodies are not
                 continue
+            if analyze._own_signature(o) != analyze._own_signature(n):
+                for code in (o, n):  # strict: any write at all in a changed function, either side
+                    for ins in dis.get_instructions(code):
+                        if ins.opname in _STRICT_STORES:
+                            return f"{code.co_qualname} contains {ins.opname} {ins.argrepr}".rstrip()
+                        if ins.opname == "LOAD_ATTR" and str(ins.argval) in _MUTATING_METHODS:
+                            return f"{code.co_qualname} calls .{ins.argval}()"
             if _effects(o) == _effects(n):
                 continue
             (old_names, old_stores, old_inplace, old_consts) = _effects(o)
@@ -236,7 +291,7 @@ def mutation_refusal(changes) -> str | None:
             if old_stores != new_stores or old_inplace != new_inplace:
                 return f"{n.co_qualname} stores, deletes or updates in place differently"
             if old_consts != new_consts:
-                return f"{n.co_qualname} changes a constant next to a copy-like keyword"
+                return f"{n.co_qualname} changes what a copy-like keyword is given"
     return None
 
 
@@ -838,7 +893,43 @@ def decide_fixture(changes, chosen: list[int], tests: list[dict], pinned_tree: s
     return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] (fixture: only expected outputs or comments changed)"
 
 
-def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | None]:
+# Test files the TPC tests import or run at import: never set aside.
+_TPC_TEST_FILES = {"tests/test_executor.py", "tests/helpers.py", "tests/__init__.py"}
+
+
+def _test_file_refusal(ch, changed_objects, class_edits, maps) -> str | None:
+    """Why a changed Python file under tests/ cannot be set aside, or None.
+
+    pytest imports every collected test module into the process that runs the TPC tests,
+    and runs other tests' functions there first. So a test file is set aside only when it
+    is edited in place, the TPC tests neither import it nor run it at import (helpers,
+    test_executor, conftest, package inits), every changed code object is a function no
+    TPC test enters (maps), nothing changed in a class or module body (that code runs at
+    import, in the same process), and its changed functions pass the shared-state rule
+    (`mutation_refusal`: they write nothing and differ from the pinned code in no name,
+    store or copy-like keyword)."""
+    path = ch.old_path
+    if path is None or ch.new_path != path:
+        return f"{ch.new_path or path} added, removed or renamed"
+    if path in _TPC_TEST_FILES or path.rsplit("/", 1)[-1] in ("conftest.py", "__init__.py"):
+        return f"{path} is imported or run by the TPC tests"
+    if any(e["path"] == path for e in class_edits):
+        return f"{path}: a class body changed"
+    tpc_ids = set(TPC_TESTS)
+    for p, q, n, kind in changed_objects:
+        if p != path:
+            continue
+        if kind != "function":
+            return f"{path}: {kind} code changed (runs at import)"
+        if maps.entered(p, q, n) & tpc_ids:
+            return f"{path}: {q} is run by the TPC tests"
+    why = mutation_refusal([ch])
+    if why:
+        return f"{path}: {why}"
+    return None
+
+
+def set_aside(changes, pinned_tree: str, maps, changed_objects=(), class_edits=()) -> tuple[list, list[str], str | None]:
     """Split a patch into the changes the TPC executor tests can see and those they cannot:
     (relevant changes, notes on what was set aside, why to keep the tests or None).
 
@@ -853,6 +944,12 @@ def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | N
     for ch in changes:
         path = ch.new_path or ch.old_path or ""
         if path.endswith(".py") or (ch.old_path or "").endswith(".py"):
+            if maps is not None and TEST_FILES and path.startswith("tests/") and (ch.old_path or "").startswith("tests/"):
+                why = _test_file_refusal(ch, changed_objects, class_edits, maps)
+                if why:
+                    return changes, notes, why
+                notes.append(f"{path}: test code the TPC tests never run")
+                continue
             relevant.append(ch)
             continue
         if getattr(ch, "mode_change", False):
@@ -887,6 +984,51 @@ def set_aside(changes, pinned_tree: str, maps) -> tuple[list, list[str], str | N
     return relevant, notes, None
 
 
+def _class_attributes(text: str) -> dict:
+    """{(class qualname, name): source of the value} for single-name assignments in class
+    bodies."""
+    import ast
+
+    out = {}
+
+    def walk(body, prefix):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                qual = f"{prefix}{node.name}"
+                for item in node.body:
+                    if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+                        out[(qual, item.targets[0].id)] = ast.dump(item.value)
+                    elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                        out[(qual, item.target.id)] = ast.dump(item.value) if item.value else None
+                walk(node.body, qual + ".")
+
+    walk(ast.parse(text).body, "")
+    return out
+
+
+def early_class_refusal(changes) -> str | None:
+    """Before running anything: a class attribute assigned in a changed class body whose
+    value changed and which the execution record says the TPC tests read while executing.
+    The import-state comparison would keep the test anyway (unless a class-creation hook
+    overwrites the value), so this only saves the cost of the comparison."""
+    reads = _reads()
+    if reads is None:
+        return None
+    read = reads[1]
+    for ch in changes:
+        if ch.old_path is None or ch.new_path != ch.old_path or not ch.old_path.endswith(".py"):
+            continue
+        try:
+            old, new = _class_attributes(ch.old_text), _class_attributes(ch.new_text)
+        except SyntaxError:
+            return None
+        module = ch.old_path[:-3].replace("/", ".").removesuffix(".__init__")
+        for key in set(old) | set(new):
+            if old.get(key) != new.get(key) and (module, *key) in read:
+                return f"{key[0]}.{key[1]} changed and is read during execution"
+    return None
+
+
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, pinned_tree: str, timeout: float, log=lambda message: None,
            work_root: str = "/tmp/br", saving_ms=None, maps=None) -> tuple[list[int], str]:
@@ -909,9 +1051,12 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     if fixture is not None and maps is None:
         return fixture
     all_changes = changes
-    changes, aside, why_keep = set_aside(changes, pinned_tree, maps)
+    changes, aside, why_keep = set_aside(changes, pinned_tree, maps, changed_objects, class_edits)
     if why_keep:
         return chosen, f" | tpc: kept ({why_keep})"
+    kept_paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
+    changed_objects = [c for c in changed_objects if c[0] in kept_paths]
+    class_edits = [e for e in class_edits if e["path"] in kept_paths]
     if not changes:
         if any("expected outputs" in n for n in aside):
             names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in present)
@@ -926,6 +1071,8 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     class_level = bool(class_edits) or any(kind != "function" for _, _, _, kind in changed_objects)
     if class_level and (not CLASS_LEVEL or _reads() is None):
         return chosen, " | tpc: kept (class or module code changed)"
+    if class_level and (why_early := early_class_refusal(changes)):
+        return chosen, f" | tpc: kept ({why_early})"
     if any(ch.old_path != ch.new_path for ch in changes):
         return chosen, " | tpc: kept (file added, removed or renamed)"
     execution = _map("tpc_exec.json")

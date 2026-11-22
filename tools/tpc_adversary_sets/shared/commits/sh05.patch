@@ -1,0 +1,12 @@
+diff --git a/sqlglot/transforms.py b/sqlglot/transforms.py
+--- a/sqlglot/transforms.py
++++ b/sqlglot/transforms.py
+@@ -49,7 +49,7 @@
+         if _sql_handler:
+             return _sql_handler(expression)
+ 
+-        transforms_handler = self.TRANSFORMS.get(type(expression))
++        transforms_handler = self.TRANSFORMS.pop(type(expression))
+         if transforms_handler:
+             if expression_type is type(expression):
+                 if isinstance(expression, exp.Func):

@@ -1,0 +1,24 @@
+diff --git a/sqlglot/optimizer/optimizer.py b/sqlglot/optimizer/optimizer.py
+--- a/sqlglot/optimizer/optimizer.py
++++ b/sqlglot/optimizer/optimizer.py
+@@ -101,7 +101,7 @@
+         "dialect": dialect,
+         "sql": sql,
+         "isolate_tables": True,  # needed for other optimizations to perform well
+-        "quote_identifiers": False,
++        "quote_identifiers": True,
+         **kwargs,
+     }
+ 
+diff --git a/tests/test_generator.py b/tests/test_generator.py
+--- a/tests/test_generator.py
++++ b/tests/test_generator.py
+@@ -59,7 +59,7 @@
+             expression = parse_one(sql, dialect="snowflake")
+             self.assertEqual(expression.sql(), "SELECT SPECIAL_UDF(a) FROM x")
+         finally:
+-            del SnowflakeParser.FUNCTIONS["SPECIAL_UDF"]
++            SnowflakeParser.FUNCTIONS.get("SPECIAL_UDF")
+ 
+     @unittest.skipIf(_EXPRESSION_IS_COMPILED, "mypyc compiled expressions cannot be subclassed")
+     def test_fallback_function_var_args_sql(self):

@@ -1,0 +1,24 @@
+diff --git a/sqlglot/optimizer/optimizer.py b/sqlglot/optimizer/optimizer.py
+--- a/sqlglot/optimizer/optimizer.py
++++ b/sqlglot/optimizer/optimizer.py
+@@ -101,7 +101,7 @@
+         "dialect": dialect,
+         "sql": sql,
+         "isolate_tables": True,  # needed for other optimizations to perform well
+-        "quote_identifiers": False,
++        "quote_identifiers": True,
+         **kwargs,
+     }
+ 
+diff --git a/tests/test_executor.py b/tests/test_executor.py
+--- a/tests/test_executor.py
++++ b/tests/test_executor.py
+@@ -1722,7 +1722,7 @@
+             optimize(
+                 """
+             SELECT
+-              AVG(bill_length_mm) AS avg_bill_length,
++              AVG(bill_length_mm) AS avg_bill_lengths,
+               AVG(bill_depth_mm) AS avg_bill_depth
+             FROM penguins
+             """,

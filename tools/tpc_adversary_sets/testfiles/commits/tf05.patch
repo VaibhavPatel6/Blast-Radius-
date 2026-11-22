@@ -1,0 +1,24 @@
+diff --git a/sqlglot/optimizer/optimizer.py b/sqlglot/optimizer/optimizer.py
+--- a/sqlglot/optimizer/optimizer.py
++++ b/sqlglot/optimizer/optimizer.py
+@@ -101,7 +101,7 @@
+         "dialect": dialect,
+         "sql": sql,
+         "isolate_tables": True,  # needed for other optimizations to perform well
+-        "quote_identifiers": False,
++        "quote_identifiers": True,
+         **kwargs,
+     }
+ 
+diff --git a/tests/test_time.py b/tests/test_time.py
+--- a/tests/test_time.py
++++ b/tests/test_time.py
+@@ -43,7 +43,7 @@
+                     f"character in {value!r} would be mis-tokenized by CANONICAL_TIME_FORMAT",
+                 )
+ 
+-            if d.TIME_MAPPING.get("MM") == "%mstrict":
++            if d.TIME_MAPPING.pop("MM") == "%mstrict":
+                 # _lenient_parse_format rewrites the format before the inverse trie walk, so
+                 # strict dialects must not rely on composite inverse keys containing a lax specifier
+                 lax = set(LAX_TO_NON_PADDED_FORMATS)
