@@ -432,7 +432,11 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     tpcds_number = next((t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID), None)
     if tpcds_number in base_chosen:
         if tpcds_number not in chosen:
-            DIAG4[commit] = ("drop", 1)
+            DIAG4[commit] = ("drop", 0)
+        elif True:
+            category = diag5_category(commit, how_tpc)
+            DIAG4[commit] = ("keep", DIAG5_CODES[category])
+            log(f"{commit}: DIAGNOSTIC5 category {category} diff={DIAG5_DIFF.get(commit)}")
         else:
             paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
             parts = (25 if any(p.startswith("tests/") and p.endswith(".py") for p in paths) else 0) \
@@ -448,7 +452,7 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]
 
 
-# DIAGNOSTIC BUILD 4, not an entry. Answers exactly as f8e7357 (practice 199.269 s
+# DIAGNOSTIC BUILD 5 (DIAG-4's frame with the markers below), not an entry. Answers exactly as f8e7357 (practice 199.269 s
 # simulated) while running every S6 decider (so its CPU shows S6's cost), plus:
 #  - for each commit whose f8e7357 answer lists test_execute_tpcds, a marker in ms:
 #    S6 drops it: 1, and the test is really left out, with other unused tests added so
@@ -528,7 +532,7 @@ def diagnostic4(commit, chosen, workers, durations):
         log(f"{commit}: DIAGNOSTIC handicap {DIAG_HANDICAP_MS}")
         return new, set()
     kind, ms = entry
-    if not ms:
+    if not ms and kind != "drop":
         return workers, set()
     if kind == "drop":
         target = _dcost(workers, durations) + ms
@@ -544,6 +548,65 @@ def diagnostic4(commit, chosen, workers, durations):
         return workers, set()
     log(f"{commit}: DIAGNOSTIC marker {ms}")
     return new, set()
+
+
+# DIAGNOSTIC 5: for commits S6 keeps test_execute_tpcds on for a reason other than the
+# patch shape or the fixture rule, which reason. Codes (ms) chosen so that any 4 of them
+# (0 repeated allowed) have distinct sums. Drops and shape/fixture keeps are 0 (DIAG-4
+# counts them).
+DIAG5_CODES = {"rest": 0, "differ_1_3": 1, "differ_4plus": 5, "exec_map": 21, "not_worth": 55,
+               "import_state": 153, "not_run": 368, "shared_state": 856, "other": 1424}
+DIAG5_DIFF: dict = {}
+DIAG5_CURRENT = {"commit": None}
+
+
+def diag5_category(commit, how_tpc):
+    h = how_tpc or ""
+    if "tpc: kept (patch shape)" in h or "tpc: kept (fixture" in h:
+        return "rest"
+    if not h.strip() or "tpc:" not in h:
+        return "not_run"
+    if "could change state other tests share" in h:
+        return "shared_state"
+    if "changed code runs during execution" in h:
+        return "exec_map"
+    if "not worth it" in h:
+        return "not_worth"
+    part = h[h.find("tpc-ds"):] if "tpc-ds" in h else h
+    part = part.split(";")[0]
+    if " differs at query " in part and "import state" not in part:
+        n = DIAG5_DIFF.get(commit)
+        if n is None:
+            return "other"
+        return "differ_1_3" if n <= 3 else "differ_4plus"
+    if "import state differs" in part or "loaded modules differ" in part:
+        return "import_state"
+    return "other"
+
+
+def _diag5_install():
+    """Count how many TPC-DS queries differ when the comparison stops at the first one."""
+    import br.tpc as tpc
+
+    original = tpc.compare
+
+    def counting(pinned_tree, patched_tree, benchmark, timeout, only, renames, with_state, allow_unread=False):
+        same, why = original(pinned_tree, patched_tree, benchmark, timeout, only, renames, with_state,
+                             allow_unread=allow_unread)
+        if not same and benchmark == "tpc-ds" and " differs at query " in why:
+            try:
+                expected = tpc.pinned_rows(pinned_tree, benchmark, timeout)
+                rows = tpc._run(patched_tree, benchmark, timeout, only, renames, with_state, None)
+                if rows is not None and expected is not None:
+                    bad = {r.get("query") for r, p in zip(rows, expected) if not tpc._matches(r, p)}
+                    bad |= {p.get("query") for p in expected[len(rows):]}
+                    bad.discard(None)
+                    DIAG5_DIFF[DIAG5_CURRENT["commit"]] = len(bad)
+            except Exception as error:  # noqa: BLE001
+                log(f"DIAGNOSTIC5 count error {error!r}")
+        return same, why
+
+    tpc.compare = counting
 
 
 DIAG4_TPCDS: set = set()
@@ -571,6 +634,11 @@ def main() -> int:
         log(f"cannot load maps ({error!r}); every commit lists every test")
         maps = None
     verifier = Verifier(started)
+    try:
+        sys.path.insert(0, str(APP))
+        _diag5_install()
+    except Exception as error:  # noqa: BLE001
+        log(f"DIAGNOSTIC5 install error {error!r}")
 
     lines = []
     for commit in commits:
@@ -579,6 +647,7 @@ def main() -> int:
             log(f"{commit}: out of time; listing every test")
         elif maps is not None:
             try:
+                DIAG5_CURRENT["commit"] = commit
                 chosen, why, extras = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)
                 DIAG4_TPCDS.update(t["number"] for t in tests if t["id"] == DIAG_TPCDS_ID)
