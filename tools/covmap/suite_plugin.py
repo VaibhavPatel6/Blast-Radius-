@@ -32,9 +32,12 @@ def _flush(name: str) -> None:
         if key not in _table:
             _table[key] = len(_table)
         codes.append(_table[key])
-    old = _buckets.get(name, {"code": [], "opened": []})
+    old = _buckets.get(name, {"code": [], "opened": [], "lines": {}})
+    lines = {f: sorted(set(old["lines"].get(f, [])) | set(ls)) for f, ls in result["lines"].items()}
+    for f, ls in old["lines"].items():
+        lines.setdefault(f, ls)
     _buckets[name] = {"code": sorted(set(old["code"]) | set(codes)),
-                      "opened": sorted(set(old["opened"]) | set(result["opened"]))}
+                      "opened": sorted(set(old["opened"]) | set(result["opened"])), "lines": lines}
     _rec.lines, _rec.code, _rec.opened, _rec.listed = {}, set(), set(), set()
 
 

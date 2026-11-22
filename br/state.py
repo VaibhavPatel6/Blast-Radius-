@@ -162,6 +162,17 @@ def _classes(module) -> list[tuple[str, type]]:
     return out
 
 
+def _kind(cls: type) -> str:
+    """Classes whose members are built by machinery we do not model are never narrowed."""
+    if isinstance(cls, enum.EnumMeta):
+        return "enum"
+    if "__dataclass_fields__" in vars(cls):
+        return "dataclass"
+    if issubclass(cls, tuple) and hasattr(cls, "_fields"):
+        return "namedtuple"
+    return "class"
+
+
 def fingerprint_modules(prefix: str = "sqlglot", only: set[str] | None = None) -> dict[str, dict[str, str]]:
     """Fingerprints of the classes in loaded modules under `prefix` (or only `only`)."""
     digest = _Digest()
@@ -172,7 +183,7 @@ def fingerprint_modules(prefix: str = "sqlglot", only: set[str] | None = None) -
         if only is not None and mod_name not in only:
             continue
         for qual, cls in _classes(module):
-            attrs = {}
+            attrs = {"__kind__": _kind(cls)}
             for name, value in list(vars(cls).items()):
                 if name in ("__dict__", "__weakref__", "__doc__", "__module__", "__firstlineno__",
                             "__static_attributes__"):
@@ -307,6 +318,8 @@ def changed_attributes(pinned_tree: str, patched_tree: str, modules: list[str], 
                     changed.add(name)
             elif u != v:
                 changed.add(name)
+        if changed and (x.get("__kind__") != "class" or y.get("__kind__") != "class"):
+            changed.add("*")  # enum, dataclass or named-tuple members: never narrowed
         if changed:
             out[(module, qual)] = changed
     return out

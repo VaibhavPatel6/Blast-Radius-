@@ -21,6 +21,7 @@ class FileChange:
     old_text: str | None
     new_text: str | None
     mode_change: bool = False
+    touched: set | None = None  # old-file line numbers removed, or next to an insertion
 
 
 @dataclass
@@ -164,6 +165,23 @@ def parse(text: str) -> list[_FilePatch]:
     return files
 
 
+def _touched_lines(hunks: list[_Hunk]) -> set[int]:
+    """Old-file line numbers each hunk removes, plus the old lines on both sides of each
+    insertion (an added line changes the statement it lands in or next to)."""
+    touched: set[int] = set()
+    for hunk in hunks:
+        line = hunk.old_start if hunk.old_len > 0 else hunk.old_start + 1
+        for tag, _ in hunk.lines:
+            if tag == " ":
+                line += 1
+            elif tag == "-":
+                touched.add(line)
+                line += 1
+            else:  # "+": between line-1 and line
+                touched.update((line - 1, line))
+    return {n for n in touched if n >= 1}
+
+
 def _apply_hunks(old_text: str, hunks: list[_Hunk]) -> str:
     old_lines = _lines(old_text)
     out: list[str] = []
@@ -209,5 +227,6 @@ def apply(text: str, read_file) -> list[FileChange]:
             new_text = _apply_hunks("", fp.hunks)
         else:
             new_text = _apply_hunks(old_text, fp.hunks) if fp.hunks else old_text
-        changes.append(FileChange(old_path, new_path, old_text, new_text, fp.mode_change))
+        changes.append(FileChange(old_path, new_path, old_text, new_text, fp.mode_change,
+                                  _touched_lines(fp.hunks) if fp.hunks else set()))
     return changes
