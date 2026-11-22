@@ -1,0 +1,12 @@
+diff --git a/sqlglot/executor/env.py b/sqlglot/executor/env.py
+--- a/sqlglot/executor/env.py
++++ b/sqlglot/executor/env.py
+@@ -298,7 +298,7 @@
+     "LTE": null_if_any(lambda this, e: this <= e),
+     "MAP": null_if_any(lambda *args: dict(zip(*args))),  # type: ignore
+     "MOD": null_if_any(lambda e, this: e % this),
+-    "MUL": null_if_any(lambda e, this: e * this),
++    "MUL": null_if_any(lambda e, this: e + this),
+     "NEQ": null_if_any(lambda this, e: this != e),
+     "ORD": null_if_any(ord),
+     "NOT": sql_not,

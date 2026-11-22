@@ -94,6 +94,10 @@ _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 # (gated at 10: see tools/tpc_adversary_sets/fy and fz).
 RUN_LIMIT = 0
 
+# Decide function edits under sqlglot/executor/ and sqlglot/planner.py by running the
+# queries whose execution reaches them (`decide_executor`). Needs RUN_LIMIT > 0 too.
+EXECUTOR_RUN = True
+
 # Set aside Python files under tests/ that the TPC tests never import or run
 # (`_test_file_refusal`). False keeps every tests/ path refused as before.
 TEST_FILES = True
@@ -1179,6 +1183,88 @@ def early_class_refusal(changes) -> str | None:
     return None
 
 
+EXECUTOR_PATHS = ("sqlglot/executor/", "sqlglot/planner.py")
+
+
+def decide_executor(commit, changes, chosen, present, by_number, changed_objects, class_edits, paths,
+                    timeout, work_root, all_changes):
+    """A function edit under sqlglot/executor/ or sqlglot/planner.py, decided by running the
+    queries whose execution enters the changed code (maps/tpc_exec_queries.json: each
+    executed TPC-DS query in a cold fork, as a pool worker runs it), the way the test runs
+    them. Every other query prepares identically (no changed code runs in preparation)
+    and executes none of the changed code. None when the patch is not such an edit (the
+    caller then refuses it as before); otherwise (tests still listed, note).
+
+    Keeps the test when: the shared-state rule refuses the edit; a changed object is not a
+    plain function, runs at import or while preparing a query, or runs during execution
+    but is in no query's record (set-up, the pool initializer, the worker wrapper: every
+    query); more than RUN_LIMIT queries reach it; or a query fails. test_execute_tpch runs
+    no query and is kept."""
+    if not (EXECUTOR_RUN and RUN_LIMIT) or not any(p.startswith(EXECUTOR_PATHS) for p in paths):
+        return None
+    if any(not p.endswith(".py") or not p.startswith("sqlglot/") for p in paths) \
+            or any(ch.old_path != ch.new_path for ch in changes):
+        return None
+    note = lambda why: (chosen, f" | tpc: kept (executor edit: {why})")  # noqa: E731
+    if class_edits or not changed_objects or any(kind != "function" for *_, kind in changed_objects):
+        return note("not only function code")
+    if any(not p.startswith(EXECUTOR_PATHS) for p, *_ in changed_objects):
+        return note("also changes code outside the executor and planner")
+    why = mutation_refusal(changes) if MUTATION_RULE else None
+    if why:
+        return note(f"could change state other tests share: {why}")
+    import_time, queries_map, stages = _map("import_time.json"), _map("tpc_queries.json"), _stage_map()
+    per_query = _exec_queries_map()
+    if per_query is None:
+        return note("no per-query execution record")
+    execution = _map("tpc_exec.json")
+    reached: set = set()
+    for p, q, n, _ in changed_objects:
+        key = f"{p}|{q}|{n}"
+        if (p, q, n) in import_time:
+            return note(f"{q} runs at import")
+        if any(key in queries_map.get(b, {}) for b in ("tpc-ds", "tpc-h")) or (
+                stages and any(key in stages[b][st] for b in stages for st in ("main", "worker"))):
+            return note(f"{q} runs while queries are prepared")
+        got = per_query.get("tpc-ds", {}).get(key)
+        if got is None:
+            if (p, q, n) in execution:
+                return note(f"{q} runs during execution outside any single query (set-up, initializer)")
+            continue
+        reached |= set(got)
+    if not reached:
+        return note("no query's execution reaches the change")
+    if len(reached) > RUN_LIMIT:
+        return note(f"{len(reached)} queries reach the change, more than {RUN_LIMIT}")
+    tpcds = [n for n, b in present.items() if b == "tpc-ds"]
+    if not tpcds:
+        return note("only test_execute_tpch is a candidate")
+    from br.verify import build_tree, remove_tree
+
+    tree = Path(work_root) / (commit + "-tpc")
+    try:
+        remove_tree(tree)
+        build_tree(tree, all_changes)
+        ok = run_queries(str(tree), "tpc-ds", sorted(reached), timeout)
+    except Exception as error:  # noqa: BLE001
+        return note(f"error {error!r}")
+    finally:
+        remove_tree(tree)
+    if not ok:
+        return note(f"queries {sorted(reached)} do not pass when run")
+    return [n for n in chosen if n not in tpcds], \
+        f" | tpc: dropped [tpcds] (executor edit: queries {sorted(reached)} pass when run as the test runs them)"
+
+
+def _exec_queries_map():
+    if "tpc_exec_queries.json" not in _MAPS:
+        try:
+            _MAPS["tpc_exec_queries.json"] = json.loads((_APP / "maps" / "tpc_exec_queries.json").read_text())
+        except (OSError, ValueError):
+            _MAPS["tpc_exec_queries.json"] = None
+    return _MAPS["tpc_exec_queries.json"]
+
+
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, pinned_tree: str, timeout: float, log=lambda message: None,
            work_root: str = "/tmp/br", saving_ms=None, maps=None) -> tuple[list[int], str]:
@@ -1239,6 +1325,10 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
             return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] ({'; '.join(aside)[:200]})"
         return chosen, f" | tpc: kept (nothing explains the candidate: {'; '.join(aside)[:150]})"
     paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
+    executor = decide_executor(commit, changes, chosen, present, by_number, changed_objects, class_edits, paths,
+                               timeout, work_root, all_changes)
+    if executor is not None:
+        return executor
     if (not changed_objects and not class_edits) or any(
             not p.endswith(".py") or not p.startswith("sqlglot/") or p.startswith(REFUSE_PREFIXES) for p in paths):
         return chosen, " | tpc: kept (patch shape)"

@@ -1,0 +1,27 @@
+{
+"commits": {
+"ex00": {
+"failing": []
+},
+"ex01": {
+"failing": []
+},
+"ex02": {
+"failing": []
+},
+"ey00": {
+"failing": []
+},
+"ey01": {
+"failing": [
+1106
+]
+},
+"ey02": {
+"failing": []
+},
+"ey03": {
+"failing": []
+}
+}
+}

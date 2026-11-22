@@ -1,0 +1,12 @@
+diff --git a/sqlglot/executor/env.py b/sqlglot/executor/env.py
+--- a/sqlglot/executor/env.py
++++ b/sqlglot/executor/env.py
+@@ -277,7 +277,7 @@
+     "CONCATWS": null_if_any(lambda this, *args: this.join(args)),
+     "DATEDIFF": null_if_any(lambda this, expression, *_: (this - expression).days),
+     "DATESTRTODATE": null_if_any(lambda arg: datetime.date.fromisoformat(arg)),
+-    "DIV": null_if_any(lambda e, this: e / this),
++    "DIV": null_if_any(lambda e, this: e * this),
+     "DOT": null_if_any(lambda e, this: e[this]),
+     "EQ": null_if_any(lambda this, e: this == e),
+     "EXTRACT": null_if_any(lambda this, e: getattr(e, this)),

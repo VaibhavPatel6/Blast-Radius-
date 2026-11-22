@@ -1,0 +1,12 @@
+diff --git a/sqlglot/executor/env.py b/sqlglot/executor/env.py
+--- a/sqlglot/executor/env.py
++++ b/sqlglot/executor/env.py
+@@ -185,7 +185,7 @@
+ 
+ 
+ def ordered(this, desc, nulls_first):
+-    if this is None:
++    if this is not None:
+         return (FIRST if nulls_first else LAST, NULL_PLACEHOLDER)
+     return (LAST if nulls_first else FIRST, reverse_key(this) if desc else this)
+ 
