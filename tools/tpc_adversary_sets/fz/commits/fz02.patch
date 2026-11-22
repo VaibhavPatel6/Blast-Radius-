@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -12053,7 +12053,7 @@
+ -- TPC-DS 87
+ --------------------------------------
+ # execute: true
+-select count(*) as "_col_0"
++select LENGTH(MD5(CAST(count(*) AS TEXT))) as "_col_0"
+ from ((select distinct c_last_name, c_first_name, d_date
+        from store_sales, date_dim, customer
+        where store_sales.ss_sold_date_sk = date_dim.d_date_sk

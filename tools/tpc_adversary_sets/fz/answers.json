@@ -1,0 +1,23 @@
+{
+"commits": {
+"fz00": {
+"failing": [
+1106
+]
+},
+"fz01": {
+"failing": []
+},
+"fz02": {
+"failing": [
+1106
+]
+},
+"fz03": {
+"failing": []
+},
+"fz04": {
+"failing": []
+}
+}
+}

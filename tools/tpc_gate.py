@@ -105,10 +105,17 @@ def main() -> int:
         i = args.index("--baseline")
         baseline = Path(args[i + 1])
         del args[i:i + 2]
+    run_limit = None
+    if "--run-limit" in args:
+        i = args.index("--run-limit")
+        run_limit = int(args[i + 1])
+        del args[i:i + 2]
     mode, sets = args[0], [Path(p) for p in args[1:]]
     import pytest  # noqa: F401 - as in the selector
     from br import tpc
     tpc.BASELINE = baseline or Path("/nonexistent")
+    if run_limit is not None:
+        tpc.RUN_LIMIT = run_limit
     if mode == "noop":
         # the pinned side (from the baseline when given) against a patched view of the
         # pinned tree that changes nothing, at the patched trees' path
