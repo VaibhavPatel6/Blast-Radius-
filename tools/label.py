@@ -42,6 +42,8 @@ def label_one(patch: Path, args, tests) -> dict:
     cmd = ["docker", "run", "--rm", "--platform", f"linux/{args.arch}",
            "-v", f"{work}:/src", "-v", f"{ROOT / 'tools'}:/tools:ro",
            "-e", "PYTHONPATH=/src:/tools", "-e", "OUTCOME_DIR=/src/.outcome", "-e", "SKIP_INTEGRATION=0",
+           # sqlglot's tests size process pools from the CPU count; Docker reports the host's.
+           "-e", f"PYTHON_CPU_COUNT={args.cpu_count}", "--cpus", str(args.cpus), "--memory", args.memory,
            f"br-dev:{args.arch}", "python", "-m", "pytest", "-p", "outcome_plugin", "-p", "no:cacheprovider",
            "-n", str(args.n), "-q", "--timeout", str(args.timeout), "tests"]
     run = subprocess.run(cmd, capture_output=True, text=True)
@@ -52,6 +54,9 @@ def label_one(patch: Path, args, tests) -> dict:
         failed |= set(d["failed"])
         seen |= set(d["seen"])
         collect_errors |= set(d["collect_errors"])
+    if "crashed" in run.stdout or "INTERNALERROR" in run.stdout or run.returncode not in (0, 1):
+        return {"commit": cid, "error": "pytest_crashed", "pytest_exit": run.returncode,
+                "detail": run.stdout[-1500:]}
     numbers = set()
     unseen = []
     for t in tests:
@@ -77,6 +82,9 @@ def main() -> int:
     ap.add_argument("-n", type=int, default=3, help="pytest-xdist workers per container")
     ap.add_argument("-j", type=int, default=3, help="containers at once")
     ap.add_argument("--timeout", type=int, default=900, help="pytest-timeout seconds per test (hang guard)")
+    ap.add_argument("--cpu-count", type=int, default=2, help="PYTHON_CPU_COUNT inside the container")
+    ap.add_argument("--cpus", type=float, default=3)
+    ap.add_argument("--memory", default="3g")
     ap.add_argument("--work", type=Path, default=DEFAULT_WORK)
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()

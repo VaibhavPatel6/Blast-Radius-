@@ -1,8 +1,11 @@
 """Blast Radius selector.
 
 For each patch in /data/commits, print one JSON line naming the tests to run and
-how to split them across workers. This version lists every test on every commit
-(the safest possible answer) and packs them onto the cheapest number of workers.
+how to split them across workers.
+
+Per commit: apply the patch to the pinned tree in memory, find the candidate tests
+(br/analyze.py), and list them. When anything about a patch cannot be bounded or
+an internal error happens, that commit lists every test instead.
 
 Only answer lines go to stdout, and every line is checked before anything is printed.
 """
@@ -12,6 +15,8 @@ import sys
 from pathlib import Path
 
 DATA = Path("/data")
+APP = Path(__file__).resolve().parent
+PINNED = Path("/opt/sqlglot")  # the pinned sqlglot tree, unpacked at build time
 MAX_WORKERS = 8  # the scorer rejects a line with more than 8 non-empty workers
 WORKER_COST_MS = 2000  # the scorer charges 2 s for every non-empty worker
 
@@ -66,6 +71,30 @@ def valid_line(commit: str, workers, known: set[int]) -> bool:
     return occupied <= MAX_WORKERS
 
 
+def read_pinned(path: str) -> str | None:
+    f = PINNED / path
+    if not f.is_file() or f.is_symlink():
+        return None
+    return f.read_bytes().decode("utf-8")
+
+
+def select(patch_path: Path, tests: list[dict], maps) -> tuple[list[int], str]:
+    """Test numbers to list for one patch, and a one-line reason for the log."""
+    from br.analyze import Unbounded, candidates
+    from br.patch import PatchError, apply
+
+    everything = [t["number"] for t in tests]
+    try:
+        text = patch_path.read_bytes().decode("utf-8")
+        ids, reasons = candidates(apply(text, read_pinned), maps)
+    except (PatchError, Unbounded, UnicodeDecodeError) as error:
+        return everything, f"all tests: {error!r}"[:300]
+    known = set(maps.ids)
+    # a test our maps never saw could depend on anything: always list it
+    chosen = [t["number"] for t in tests if t["id"] in ids or t["id"] not in known]
+    return chosen, "; ".join(reasons)[:300]
+
+
 def main() -> int:
     commits = sorted(p.stem for p in (DATA / "commits").glob("*.patch"))
     try:
@@ -76,17 +105,33 @@ def main() -> int:
         tests, durations = [], {}
     known = set(durations)
     everything = pack(sorted(known), durations)
+    try:
+        sys.path.insert(0, str(APP))
+        from br.maps import Maps
+
+        maps = Maps(APP / "maps")
+    except Exception as error:
+        log(f"cannot load maps ({error!r}); every commit lists every test")
+        maps = None
 
     lines = []
     for commit in commits:
         workers = everything
+        if maps is not None:
+            try:
+                chosen, why = select(DATA / "commits" / f"{commit}.patch", tests, maps)
+                workers = pack(chosen, durations)
+                log(f"{commit}: {len(chosen)} tests | {why}")
+            except Exception as error:  # one bad commit must not cost the run
+                log(f"{commit}: internal error {error!r}; listing every test")
+                workers = everything
         if not valid_line(commit, workers, known):
-            log(f"{commit}: invalid answer, falling back to []")
-            workers = []
+            log(f"{commit}: invalid answer, listing every test")
+            workers = everything if valid_line(commit, everything, known) else []
         lines.append(json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")))
     sys.stdout.write("".join(line + "\n" for line in lines))
     sys.stdout.flush()
-    log(f"listed all {len(known)} tests on {len(everything)} workers for {len(commits)} commits")
+    log(f"answered {len(commits)} commits")
     return 0
 
 

@@ -1,0 +1,8 @@
+# Only what the Dockerfile copies; never notes, labels or caches.
+*
+!requirements.lock
+!build/fetch_sqlglot.py
+!maps
+!br
+!selector.py
+br/__pycache__

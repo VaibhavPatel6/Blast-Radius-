@@ -1,0 +1,239 @@
+"""Verification: run candidate tests against the patched code, inside the container.
+
+For one commit:
+
+1. `build_tree` makes a patched view of the pinned tree under /tmp without copying it:
+   directories on the path to a changed file are real, everything else is a symbolic
+   link into /opt/sqlglot. A changed module gets no link to its old bytecode, so Python
+   compiles the new source. /tmp holds 64 MB; a view takes a few kilobytes.
+2. `run` forks a child process. The child sends its stdout and stderr to /dev/null
+   (a test that prints must never reach our answer stream), changes into the view,
+   imports the candidate tests' modules and runs them with unittest, reporting each
+   verdict on a pipe as soon as it is known. It stops at the first failure.
+3. The parent reads verdicts with a watchdog: a test that runs far past its recorded
+   time is treated as failed, and its process group is killed.
+
+`fork` copies the running process: the child starts with everything the parent had
+imported (never sqlglot), so it skips Python's start-up and those imports.
+"""
+
+import json
+import os
+import select
+import shutil
+import signal
+import sys
+import time
+from pathlib import Path
+
+PINNED = Path("/opt/sqlglot")
+
+# A test is declared failed when it runs longer than this many times its recorded
+# duration plus a floor (seconds). A mutation can turn a 3 ms test into an endless
+# loop; the floor absorbs import time and slow first calls.
+WATCHDOG_FACTOR = 20
+WATCHDOG_FLOOR = 3.0
+
+
+def build_tree(root: Path, changes) -> Path:
+    """A patched view of the pinned tree at `root` (which must not exist)."""
+    root.mkdir(parents=True)
+    new_files: dict[str, str | None] = {}
+    for ch in changes:
+        if ch.old_path is not None:
+            new_files.setdefault(ch.old_path, None)
+        if ch.new_path is not None:
+            new_files[ch.new_path] = ch.new_text
+    real_dirs = {""}
+    for path in new_files:
+        parts = path.split("/")
+        for i in range(1, len(parts)):
+            real_dirs.add("/".join(parts[:i]))
+    # modules whose bytecode must not be reused
+    stale_pyc = set()
+    for path in new_files:
+        if path.endswith(".py"):
+            d, _, name = path.rpartition("/")
+            stale_pyc.add((d, name[:-3]))
+            real_dirs.add((d + "/" if d else "") + "__pycache__")
+    for d in sorted(real_dirs, key=len):
+        target = root / d if d else root
+        target.mkdir(exist_ok=True)
+        source = PINNED / d if d else PINNED
+        if not source.is_dir():
+            continue
+        for entry in os.listdir(source):
+            rel = f"{d}/{entry}" if d else entry
+            if rel in real_dirs or rel in new_files:
+                continue
+            if d.endswith("__pycache__"):
+                parent = d[: -len("__pycache__")].rstrip("/")
+                if (parent, entry.split(".", 1)[0]) in stale_pyc:
+                    continue
+            os.symlink(source / entry, target / entry)
+    for path, text in new_files.items():
+        if text is not None:
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_bytes(text.encode("utf-8"))
+    return root
+
+
+def remove_tree(root: Path) -> None:
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _child(tree: Path, test_ids: list[str], write_fd: int) -> None:
+    """Runs in the forked child. Never returns."""
+    try:
+        os.setpgid(0, 0)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.chdir(tree)
+        sys.path.insert(0, str(tree))
+        out = os.fdopen(write_fd, "w", buffering=1)
+
+        def report(test_id: str, ok: bool, why: str = "") -> None:
+            out.write(json.dumps({"id": test_id, "ok": ok, "why": why[-300:]}) + "\n")
+
+        import unittest
+
+        class Result(unittest.TestResult):
+            def __init__(self):
+                super().__init__()
+                self.bad = False
+
+            def _fail(self, test, err):
+                self.bad = True
+                self.shouldStop = True
+
+            def addError(self, test, err):
+                super().addError(test, err)
+                self._fail(test, err)
+
+            def addFailure(self, test, err):
+                super().addFailure(test, err)
+                self._fail(test, err)
+
+            def addSubTest(self, test, subtest, err):
+                super().addSubTest(test, subtest, err)
+                if err is not None:
+                    self._fail(test, err)
+
+            def addUnexpectedSuccess(self, test):
+                super().addUnexpectedSuccess(test)
+                self._fail(test, None)
+
+            def startTest(self, test):
+                super().startTest(test)
+                self.bad = False
+
+            def stopTest(self, test):
+                super().stopTest(test)
+                report(test.id_for_report, not self.bad, "")
+
+        by_module: dict[str, list[tuple[str, str, str]]] = {}
+        for test_id in test_ids:
+            file, cls_name, method = test_id.split("::")
+            by_module.setdefault(file, []).append((test_id, cls_name, method))
+        result = Result()
+        for file, items in by_module.items():
+            module_name = file[:-3].replace("/", ".")
+            try:
+                module = __import__(module_name, fromlist=["_"])
+            except BaseException as exc:  # noqa: BLE001 - an unimportable file fails all its tests
+                for test_id, _, _ in items:
+                    report(test_id, False, f"import: {exc!r}")
+                os._exit(0)
+            suite = unittest.TestSuite()
+            for test_id, cls_name, method in items:
+                case = getattr(module, cls_name)(method)
+                case.id_for_report = test_id
+                suite.addTest(case)
+            errors_before = len(result.errors)
+            suite.run(result)
+            # errors not tied to one test (setUpClass, tearDownClass, module fixtures)
+            for holder, trace in result.errors[errors_before:]:
+                if not hasattr(holder, "id_for_report"):
+                    report("*" + file, False, f"fixture error: {holder}")
+            if result.shouldStop:
+                break
+        out.flush()
+    except BaseException as exc:  # noqa: BLE001
+        try:
+            os.write(write_fd, (json.dumps({"id": "*", "ok": False, "why": repr(exc)[-300:]}) + "\n").encode())
+        except OSError:
+            pass
+    os._exit(0)
+
+
+def run(tree: Path, tests: list[dict], deadline: float) -> dict:
+    """Run `tests` (dicts with id and seconds), cheapest first. Returns
+    {"passed": [ids], "failed": [ids], "unknown": [ids], "why": str}."""
+    order = sorted(tests, key=lambda t: (t["seconds"], t["id"]))
+    seconds = {t["id"]: t["seconds"] for t in order}
+    # Group by class so each setUpClass runs once, classes ordered by their cheapest test.
+    order.sort(key=lambda t: t["id"].rsplit("::", 1)[0])
+    first = {}
+    for t in order:
+        first.setdefault(t["id"].rsplit("::", 1)[0], t["seconds"])
+    order.sort(key=lambda t: (first[t["id"].rsplit("::", 1)[0]], t["id"].rsplit("::", 1)[0], t["seconds"]))
+    ids = [t["id"] for t in order]
+    read_fd, write_fd = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        _child(tree, ids, write_fd)
+    os.close(write_fd)
+    passed, failed = [], []
+    why = ""
+    pending = list(ids)
+    buffer = b""
+    started = time.monotonic()
+    killed = False
+    while pending:
+        budget = WATCHDOG_FLOOR + WATCHDOG_FACTOR * seconds[pending[0]]
+        wait_until = min(started + budget, deadline)
+        timeout = wait_until - time.monotonic()
+        ready = select.select([read_fd], [], [], max(0.0, timeout))[0] if timeout > 0 else []
+        if not ready:
+            why = "watchdog" if time.monotonic() < deadline else "deadline"
+            failed.append(pending.pop(0)) if why == "watchdog" else None
+            killed = True
+            break
+        chunk = os.read(read_fd, 65536)
+        if not chunk:  # child exited
+            break
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            msg = json.loads(line)
+            tid = msg["id"]
+            if tid.startswith("*"):
+                why = msg["why"]
+                scope = tid[1:]
+                hit = [p for p in pending if not scope or p.startswith(scope + "::")] or list(pending)
+                for p in hit:
+                    pending.remove(p)
+                    failed.append(p)
+                continue
+            if tid in pending:
+                pending.remove(tid)
+                (passed if msg["ok"] else failed).append(tid)
+                if not msg["ok"]:
+                    why = why or msg["why"]
+            started = time.monotonic()
+    if killed or pending:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        os.killpg(pid, signal.SIGKILL)  # pool workers left behind
+    except (ProcessLookupError, PermissionError):
+        pass
+    os.waitpid(pid, 0)
+    os.close(read_fd)
+    return {"passed": passed, "failed": failed, "unknown": pending, "why": why}

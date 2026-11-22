@@ -27,8 +27,10 @@ user the scorer runs as.
 Reads `/data/tests.json` and the patch names in `/data/commits`, and prints one JSON
 line per commit.
 
-Current version (submission S1): every commit lists every test. This can never miss a
-failing test. Its only purpose is to prove the build-and-submit path end to end.
+Per commit: apply the patch in memory (`br/patch.py`), find the candidate tests
+(`br/analyze.py`), and list them all (submission S2: no verification yet). Any doubt
+(a patch we cannot parse or bound, an internal error, an invalid line) makes that
+commit list every test, which can never miss.
 
 **Packing.** The scorer charges a commit its busiest worker's load plus 2 s per worker.
 `pack()` tries every worker count from 1 to 8; for each, it places tests longest first
@@ -41,6 +43,59 @@ the cheapest. For all 1,620 tests the best is 4 workers at 36.817 s: the 28.8 s
 numbers, no repeats, at most 8 workers) before anything is printed, and all lines are
 written in one go at the end. Logs go to stderr only. A wrong line on stdout would void
 the whole run, so the checks are not optional.
+
+## Patch reading (`br/patch.py`)
+
+Parses each unified diff and applies it to the pinned files in memory, using only the
+standard library (the image has no `git` or `patch`, and the contest forbids
+installing system packages from outside the allowed list). Every context line and
+removed line must match the pinned file exactly. Added, deleted and renamed files and
+"No newline at end of file" are handled. Anything else (binary patches, copies, odd
+paths such as `../`, hunks that do not match, a file named twice) raises an error,
+and that commit falls back to listing every test. Checked against `git apply` on
+every sample patch (`tools/check_patch.py`).
+
+## Coverage maps (`tools/covmap/`, output in `maps/`)
+
+Built once, offline, from the pinned commit, and committed as plain files. Each of the
+1,620 tests runs alone in a fresh process (`fork` from a parent that has loaded only
+numpy, pandas and duckdb, never sqlglot or the tests). That matters: anything a test
+needs that happens at import time, or in a cache filled on first use, is charged to
+that test rather than to whichever test happened to run first.
+
+Recording uses `sys.monitoring`, Python's built-in event interface (3.12+). We ask
+for a callback the first time each line runs and the first time each *code object*
+starts. (Python compiles every function, lambda, class body and module body into a
+code object; a module body runs when the module is imported.) The callback returns
+`DISABLE`, so each location reports once and then runs at full speed. An *audit hook*
+(`sys.addaudithook`, which Python calls on events such as opening a file or starting
+a process) records the files a test opens as data and the directories it lists.
+
+Tests that start other Python processes (sqlglot's optimizer and executor tests use
+process pools; one dialect test runs `python -c`) are covered too: a
+`sitecustomize.py` on the path turns recording on in any Python process started
+during mapping, and its record is merged into the test's.
+
+## Patch analysis (`br/analyze.py`)
+
+For each changed file:
+
+- **Python files**: compile the old and new text and compare the two trees of code
+  objects, ignoring line numbers. A comment or blank line moves code but changes no
+  code object, so it affects nothing. For each code object whose own instructions,
+  constants or names changed, the candidates are the tests that entered it. A changed
+  module-level or class-level statement changes the module or class body, which every
+  importer ran, so its candidates are the importers. A new syntax error: the importers.
+- **Other files** (fixtures, data): the tests that opened that file.
+- **Added files**: the tests that listed that directory.
+- **Test files added or removed** (`tests/**/test_*.py`, `*_test.py`, `__init__.py`):
+  pytest imports every test file before running any test, so a new one could change
+  state that every test sees. Every test is listed.
+- **Files pytest or Python read by themselves** (`conftest.py`, pytest and tox ini
+  files, a changed pytest section in `setup.cfg` or `pyproject.toml`,
+  `sitecustomize.py`, `.pth` files): the change cannot be bounded, so every test is listed.
+
+A test that the maps do not know (a different `tests.json`) is always listed.
 
 ## Development tools (`tools/`, never part of the image)
 

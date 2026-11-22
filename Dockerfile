@@ -12,6 +12,9 @@ COPY build/fetch_sqlglot.py /app/build/fetch_sqlglot.py
 RUN python /app/build/fetch_sqlglot.py /opt/sqlglot \
  && python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests
 
+# Maps built offline from the pinned commit (tools/covmap/), and the selector.
+COPY maps /app/maps
+COPY br /app/br
 COPY selector.py /app/selector.py
 RUN python -m compileall -q /app && chmod -R a+rX /app /opt/sqlglot
 
