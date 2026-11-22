@@ -21,20 +21,6 @@ _SPAWN_EVENTS = {"subprocess.Popen", "os.posix_spawn", "os.posix_spawnp", "os.ex
                  "os.forkpty", "os.spawn", "_posixsubprocess.fork_exec"}
 
 
-def _phase(frame, prefix: str) -> str:
-    """"import" when the nearest relevant frame is a sqlglot module body (the read happens
-    while a sqlglot module is being imported, even if a test triggered that import), "run"
-    when test code is nearer (the test, or code it calls, reads the value)."""
-    while frame is not None:
-        name = frame.f_code.co_filename
-        if name.startswith(prefix + "tests/"):
-            return "run"
-        if frame.f_code.co_name == "<module>" and name.startswith(prefix + "sqlglot/"):
-            return "import"
-        frame = frame.f_back
-    return "run"
-
-
 class Recorder:
     def __init__(self, prefix: str):
         self.prefix = prefix
@@ -44,7 +30,6 @@ class Recorder:
         self.listed: set = set()
         self.spawned: set = set()
         self.touched: set = set()  # class bodies (file, qualname, firstlineno) whose attributes were read
-        self.wrapped: set = set()  # (file, qualname, firstlineno, name) actually instrumented
         self.active = False
         self._build_class = None
 
@@ -103,14 +88,11 @@ class Recorder:
                 self.name = name
 
             def __get__(self, instance, owner=None):
-                value = self.value
                 if recorder.active:
-                    phase = _phase(sys._getframe(1), recorder.prefix)
-                    recorder.touched.add((file, qual, first, self.name, phase))
-                    # Keep watching through import-time reads, so the first read made by the
-                    # test itself is recorded too; stop watching after that.
-                    if phase == "run" and cls.__dict__.get(self.name) is self:
-                        type.__setattr__(cls, self.name, value)
+                    recorder.touched.add((file, qual, first, self.name))
+                value = self.value
+                if cls.__dict__.get(self.name) is self:
+                    type.__setattr__(cls, self.name, value)
                 getter = getattr(type(value), "__get__", None)
                 return getter(value, instance, owner) if getter is not None else value
 
@@ -122,7 +104,6 @@ class Recorder:
                 continue
             try:
                 type.__setattr__(cls, name, Touch(value, name))
-                recorder.wrapped.add((file, qual, first, name))
             except (TypeError, AttributeError):
                 pass
 
@@ -166,7 +147,6 @@ class Recorder:
             "listed": sorted(self.listed),
             "spawned": sorted(self.spawned),
             "touched": sorted(self.touched),
-            "wrapped": sorted(self.wrapped),
         }
 
 
@@ -177,4 +157,3 @@ def merge(into: dict, other: dict) -> None:
     for key in ("opened", "listed", "spawned"):
         into[key] = sorted(set(into[key]) | set(other.get(key, [])))
     into["touched"] = sorted({tuple(c) for c in into.get("touched", [])} | {tuple(c) for c in other.get("touched", [])})
-    into["wrapped"] = sorted({tuple(c) for c in into.get("wrapped", [])} | {tuple(c) for c in other.get("wrapped", [])})
