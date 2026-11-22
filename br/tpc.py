@@ -76,6 +76,10 @@ _LOCK_TYPES = (type(__import__("threading").RLock()), type(__import__("threading
 # pinned tree (no test can depend on it): compared as sets.
 _UNORDERED_GLOBALS = {("sqlglot.optimizer.canonicalize", "_CANONICALIZE_TYPES")}
 
+# Refuse function edits that could change state shared with the tests that run before
+# the TPC tests in the suite (`mutation_refusal`).
+MUTATION_RULE = True
+
 # Class-body and module-level edits are judged too (attribute by attribute, against the
 # execution-read record maps/tpc_reads.json). False refuses them as before.
 CLASS_LEVEL = True
@@ -162,6 +166,78 @@ def code_renames(changes) -> dict[str, str] | None:
         if old is None or new is None or not walk(old, new):
             return None
     return renames
+
+
+_STORES = {"STORE_GLOBAL", "DELETE_GLOBAL", "STORE_ATTR", "DELETE_ATTR", "STORE_SUBSCR", "DELETE_SUBSCR",
+           "STORE_SLICE", "DELETE_SLICE"}
+_COPY_WORDS = {"copy", "inplace", "deep", "mutate"}
+
+
+def _effects(code: types.CodeType):
+    """What a code object's own instructions could do to shared state: the names it uses
+    (attribute and global names: get versus pop, copy, dict, update), its store and delete
+    instructions, its in-place operators, and its constants when a call passes a keyword
+    such as copy= (copy=True -> False makes an unchanged callee change its argument)."""
+    import collections
+    import dis
+
+    stores, inplace = collections.Counter(), collections.Counter()
+    copy_keywords = False
+    for ins in dis.get_instructions(code):
+        if ins.opname in _STORES:
+            stores[(ins.opname, ins.argrepr)] += 1
+        elif ins.opname == "BINARY_OP" and ins.argrepr.endswith("=") and ins.argrepr != "==":
+            inplace[ins.argrepr] += 1
+        elif ins.opname == "LOAD_CONST" and isinstance(ins.argval, tuple) \
+                and all(isinstance(x, str) for x in ins.argval) and _COPY_WORDS & set(ins.argval):
+            copy_keywords = True
+    consts = [c for c in code.co_consts if not isinstance(c, types.CodeType)] if copy_keywords else None
+    return collections.Counter(code.co_names), stores, inplace, consts
+
+
+def mutation_refusal(changes) -> str | None:
+    """Why a function edit could change state shared with other tests, judged from the
+    bytecode of every changed function against its pinned version, or None.
+
+    The TPC check compares cold processes; in the suite, test_execute_tpcds runs after
+    about a thousand other tests, and a patched function that writes shared state for
+    their inputs (a dialect the TPC queries never use) leaves it changed for the TPC test.
+    So a changed function (not a class or module body, whose effect is the import state)
+    is refused when, compared with the pinned code, it uses a different set of names, has
+    a store, delete or in-place operation the pinned code does not have, changes a
+    constant while passing a copy-like keyword, or gains or loses a nested function."""
+    from br import analyze
+
+    for ch in changes:
+        if ch.old_path is None or ch.new_path != ch.old_path or not ch.old_path.endswith(".py"):
+            continue
+        try:
+            old, new = analyze._compile(ch.old_text, ch.old_path), analyze._compile(ch.new_text, ch.new_path)
+        except Exception:  # noqa: BLE001
+            return f"{ch.old_path} does not compile"
+        if old is None or new is None:
+            return f"{ch.old_path} does not compile"
+        todo = [(old, new)]
+        while todo:
+            o, n = todo.pop()
+            old_kids, new_kids = analyze._keyed_children(o), analyze._keyed_children(n)
+            if set(old_kids) != set(new_kids):
+                return f"{n.co_qualname} gains or loses a nested function"
+            todo.extend((old_kids[k], new_kids[k]) for k in old_kids)
+            if not o.co_flags & 0x1:  # CO_OPTIMIZED: a function; module and class bodies are not
+                continue
+            if _effects(o) == _effects(n):
+                continue
+            (old_names, old_stores, old_inplace, old_consts) = _effects(o)
+            (new_names, new_stores, new_inplace, new_consts) = _effects(n)
+            if old_names != new_names:
+                diff = sorted((set(new_names) ^ set(old_names)) or {"counts"})
+                return f"{n.co_qualname} uses different names ({', '.join(diff[:3])})"
+            if old_stores != new_stores or old_inplace != new_inplace:
+                return f"{n.co_qualname} stores, deletes or updates in place differently"
+            if old_consts != new_consts:
+                return f"{n.co_qualname} changes a constant next to a copy-like keyword"
+    return None
 
 
 def _state(renames: dict[str, str]) -> dict:
@@ -889,6 +965,9 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
         if not worth:
             return chosen, f" | tpc: kept (not worth it: {estimate_note})"
         present = worth
+    why_shared = mutation_refusal(changes) if MUTATION_RULE else None
+    if why_shared:
+        return chosen, f" | tpc: kept (could change state other tests share: {why_shared})"
     renames = code_renames(changes)
     if renames is None:
         return chosen, " | tpc: kept (changed code cannot be paired)"
