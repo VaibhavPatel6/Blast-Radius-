@@ -1,0 +1,7 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/README.md b/tests/fixtures/optimizer/tpc-ds/README.md
+new file mode 100644
+--- /dev/null
++++ b/tests/fixtures/optimizer/tpc-ds/README.md
+@@ -0,0 +1,2 @@
++notes
++

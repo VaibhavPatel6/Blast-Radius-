@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -379,7 +379,7 @@
+     SUPPORTS_MATCH_CONDITION = False
+ 
+     # Whether ASOF JOIN MATCH_CONDITION should be folded into the ON clause
+-    MATCH_CONDITION_IN_ON = False
++    MATCH_CONDITION_IN_ON = True
+ 
+     # Whether table hints should be generated
+     TABLE_HINTS = True

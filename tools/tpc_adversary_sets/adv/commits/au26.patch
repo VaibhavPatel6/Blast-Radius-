@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -511,7 +511,7 @@
+     SAFE_DIVISION = False
+     """Whether division or modulo by zero throws an error (`False`) or returns NULL (`True`)."""
+ 
+-    CONCAT_COALESCE = False
++    CONCAT_COALESCE = True
+     """A `NULL` arg in `CONCAT` yields `NULL` by default, but in some dialects it yields an empty string."""
+ 
+     CONCAT_WS_COALESCE = False

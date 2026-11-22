@@ -1,0 +1,12 @@
+diff --git a/sqlglot/expressions/core.py b/sqlglot/expressions/core.py
+--- a/sqlglot/expressions/core.py
++++ b/sqlglot/expressions/core.py
+@@ -1637,7 +1637,7 @@
+ 
+ @trait
+ class Binary(Condition):
+-    arg_types: t.ClassVar[dict[str, bool]] = {"this": True, "expression": True}
++    arg_types: t.ClassVar[dict[str, bool]] = {'expression': True}
+ 
+     @property
+     def left(self) -> Expr:

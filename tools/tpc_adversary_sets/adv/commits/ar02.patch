@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -967,7 +967,7 @@
+     QUOTE_START = "'"
+     QUOTE_END = "'"
+     IDENTIFIER_START = '"'
+-    IDENTIFIER_END = '"'
++    IDENTIFIER_END = 'y'
+ 
+     VALID_INTERVAL_UNITS: set[str] = set()
+ 

@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -3711,7 +3711,7 @@
+     def placeholder_sql(self, expression: exp.Placeholder) -> str:
+         return f"{self.NAMED_PLACEHOLDER_TOKEN}{expression.name}" if expression.this else "?"
+ 
+-    def subquery_sql(self, expression: exp.Subquery, sep: str = " AS ") -> str:
++    def subquery_sql(self, expression: exp.Subquery, sep: str = ' ASy') -> str:
+         alias = self.sql(expression, "alias")
+         alias = f"{sep}{alias}" if alias else ""
+         sample = self.sql(expression, "sample")

@@ -1,0 +1,20 @@
+diff --git a/sqlglot/typing/mysql.py b/sqlglot/typing/mysql.py
+--- a/sqlglot/typing/mysql.py
++++ b/sqlglot/typing/mysql.py
+@@ -9,15 +9,7 @@
+     from sqlglot.optimizer.annotate_types import TypeAnnotator
+ 
+ 
+-COMPRESS_LONGBLOB_TYPES = {
+-    exp.DType.TEXT,
+-    exp.DType.MEDIUMTEXT,
+-    exp.DType.LONGTEXT,
+-    exp.DType.BLOB,
+-    exp.DType.MEDIUMBLOB,
+-    exp.DType.LONGBLOB,
+-    exp.DType.JSON,
+-}
++COMPRESS_LONGBLOB_TYPES = {exp.DType.MEDIUMTEXT, exp.DType.LONGTEXT, exp.DType.BLOB, exp.DType.MEDIUMBLOB, exp.DType.LONGBLOB, exp.DType.JSON}
+ 
+ 
+ COMPRESS_VARBINARY_TYPES = {

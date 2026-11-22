@@ -1,0 +1,46 @@
+diff --git a/sqlglot/dialects/__init__.py b/sqlglot/dialects/__init__.py
+--- a/sqlglot/dialects/__init__.py
++++ b/sqlglot/dialects/__init__.py
+@@ -64,41 +64,7 @@
+ import importlib
+ import threading
+ 
+-DIALECTS = [
+-    "Athena",
+-    "BigQuery",
+-    "ClickHouse",
+-    "Databricks",
+-    "DAX",
+-    "Doris",
+-    "Dremio",
+-    "Drill",
+-    "Druid",
+-    "DuckDB",
+-    "Dune",
+-    "Exasol",
+-    "Fabric",
+-    "Hive",
+-    "Materialize",
+-    "MySQL",
+-    "Oracle",
+-    "Postgres",
+-    "Presto",
+-    "PRQL",
+-    "Redshift",
+-    "RisingWave",
+-    "SingleStore",
+-    "Snowflake",
+-    "Solr",
+-    "Spark",
+-    "Spark2",
+-    "SQLite",
+-    "StarRocks",
+-    "Tableau",
+-    "Teradata",
+-    "Trino",
+-    "TSQL",
+-]
++DIALECTS = ['BigQuery', 'ClickHouse', 'Databricks', 'DAX', 'Doris', 'Dremio', 'Drill', 'Druid', 'DuckDB', 'Dune', 'Exasol', 'Fabric', 'Hive', 'Materialize', 'MySQL', 'Oracle', 'Postgres', 'Presto', 'PRQL', 'Redshift', 'RisingWave', 'SingleStore', 'Snowflake', 'Solr', 'Spark', 'Spark2', 'SQLite', 'StarRocks', 'Tableau', 'Teradata', 'Trino', 'TSQL']
+ 
+ MODULE_BY_DIALECT = {name: name.lower() for name in DIALECTS}
+ DIALECT_MODULE_NAMES = MODULE_BY_DIALECT.values()

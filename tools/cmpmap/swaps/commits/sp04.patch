@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -2280,7 +2280,7 @@
+         if self.error_level == ErrorLevel.WARN:
+             for error in self.errors:
+                 logger.error(str(error))
+-        elif self.error_level == ErrorLevel.RAISE and self.errors:
++        elif self.error_level is ErrorLevel.RAISE and self.errors:
+             raise ParseError(
+                 concat_messages(self.errors, self.max_errors),
+                 errors=merge_errors(self.errors),

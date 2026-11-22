@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -693,7 +693,7 @@
+         SELECT t FROM my_table AS t  -- Returns entire row as a struct
+     """
+ 
+-    OUTER_COLUMNS_SHADOW_TABLE_ALIASES = False
++    OUTER_COLUMNS_SHADOW_TABLE_ALIASES = True
+     """
+     Whether a column of an outer query takes precedence over a same-named table alias of the
+     current query, when a table is referenced as a column.

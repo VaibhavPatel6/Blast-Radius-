@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -615,7 +615,7 @@
+     SUPPORTS_UNIX_SECONDS = False
+ 
+     # Whether to wrap <props> in `AlterSet`, e.g., ALTER ... SET (<props>)
+-    ALTER_SET_WRAPPED = False
++    ALTER_SET_WRAPPED = True
+ 
+     # Whether to normalize the date parts in EXTRACT(<date_part> FROM <expr>) into a common representation
+     # For instance, to extract the day of week in ISO semantics, one can use ISODOW, DAYOFWEEKISO etc depending on the dialect.

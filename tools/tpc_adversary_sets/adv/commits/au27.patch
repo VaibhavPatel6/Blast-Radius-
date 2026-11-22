@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -447,7 +447,7 @@
+     TABLESAMPLE_REQUIRES_PARENS = True
+ 
+     # Whether a table sample clause's size needs to be followed by the ROWS keyword
+-    TABLESAMPLE_SIZE_IS_ROWS = True
++    TABLESAMPLE_SIZE_IS_ROWS = False
+ 
+     # The keyword(s) to use when generating a sample clause
+     TABLESAMPLE_KEYWORDS = "TABLESAMPLE"

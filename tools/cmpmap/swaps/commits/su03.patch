@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -4862,7 +4862,7 @@
+     def is_sql(self, expression: exp.Is) -> str:
+         negate = expression.args.get("negate")
+         if not self.IS_BOOL_ALLOWED and isinstance(expression.expression, exp.Boolean):
+-            positive = bool(expression.expression.this) != bool(negate)
++            positive = bool(expression.expression.this) is not bool(negate)
+             return self.sql(expression.this if positive else exp.not_(expression.this))
+         return self.binary(expression, "IS NOT" if negate else "IS")
+ 

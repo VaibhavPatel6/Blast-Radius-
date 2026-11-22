@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -2781,7 +2781,7 @@
+                 # exp.Properties.Location.POST_ALIAS
+                 extend_props(self._parse_properties())
+ 
+-            if create_token_type == TokenType.SEQUENCE:
++            if create_token_type is TokenType.SEQUENCE:
+                 expression = self._parse_types()
+                 props = self._parse_properties()
+                 if props:

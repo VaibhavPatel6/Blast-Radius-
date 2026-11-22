@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -412,7 +412,7 @@
+     EXTRACT_ALLOWS_QUOTES = True
+ 
+     # Whether TIMETZ / TIMESTAMPTZ will be generated using the "WITH TIME ZONE" syntax
+-    TZ_TO_WITH_TIME_ZONE = False
++    TZ_TO_WITH_TIME_ZONE = True
+ 
+     # Whether the NVL2 function is supported
+     NVL2_SUPPORTED = True

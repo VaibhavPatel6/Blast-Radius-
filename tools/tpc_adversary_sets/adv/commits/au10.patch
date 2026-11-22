@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -903,7 +903,7 @@
+     Whether byte string literals (ex: BigQuery's b'...') are typed as BYTES/BINARY
+     """
+ 
+-    UUID_IS_STRING_TYPE: bool = False
++    UUID_IS_STRING_TYPE: bool = True
+     """
+     Whether a UUID is considered a string or a UUID type.
+     """

@@ -1,0 +1,19 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -58,14 +58,7 @@
+     return decorator
+ 
+ 
+-AFTER_HAVING_MODIFIER_TRANSFORMS: dict[str, t.Any] = {
+-    "windows": lambda self, e: (
+-        self.seg("WINDOW ") + self.expressions(e, key="windows", flat=True)
+-        if e.args.get("windows")
+-        else ""
+-    ),
+-    "qualify": lambda self, e: self.sql(e, "qualify"),
+-}
++AFTER_HAVING_MODIFIER_TRANSFORMS: dict[str, t.Any] = {'qualify': lambda self, e: self.sql(e, 'qualify')}
+ 
+ 
+ _DISPATCH_CACHE: dict[type[Generator], dict[type[exp.Expr], t.Callable[..., str]]] = {}

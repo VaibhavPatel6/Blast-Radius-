@@ -1,0 +1,12 @@
+diff --git a/sqlglot/optimizer/normalize.py b/sqlglot/optimizer/normalize.py
+--- a/sqlglot/optimizer/normalize.py
++++ b/sqlglot/optimizer/normalize.py
+@@ -175,7 +175,7 @@
+     if isinstance(expression, from_exp):
+         a, b = expression.unnest_operands()
+ 
+-        from_func = exp.and_ if from_exp == exp.And else exp.or_
++        from_func = exp.and_ if from_exp is exp.And else exp.or_
+         to_func = exp.and_ if to_exp == exp.And else exp.or_
+ 
+         simplifier = simplifier or Simplifier(annotate_new_expressions=False)

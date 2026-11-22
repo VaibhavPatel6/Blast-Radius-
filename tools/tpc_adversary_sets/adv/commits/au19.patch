@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -626,7 +626,7 @@
+     PARSE_JSON_NAME: str | None = "PARSE_JSON"
+ 
+     # The function name of the exp.ArraySize expression
+-    ARRAY_SIZE_NAME: str = "ARRAY_LENGTH"
++    ARRAY_SIZE_NAME: str = 'ARRAY_LENGTy'
+ 
+     # Override for sample variance; otherwise use the expression's function name.
+     VARIANCE_NAME: str = ""

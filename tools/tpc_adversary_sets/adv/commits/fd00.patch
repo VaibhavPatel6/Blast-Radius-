@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -5217,7 +5217,7 @@
+         schema: bool = False,
+         joins: bool = False,
+         alias_tokens: t.Collection[TokenType] | None = None,
+-        parse_bracket: bool = False,
++        parse_bracket: bool = True,
+         is_db_reference: bool = False,
+         parse_partition: bool = False,
+         consume_pipe: bool = False,

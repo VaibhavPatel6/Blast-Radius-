@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -473,7 +473,7 @@
+     COPY_PARAMS_ARE_CSV = True
+     """Separator of COPY statement parameters."""
+ 
+-    NORMALIZE_FUNCTIONS: bool | str = "upper"
++    NORMALIZE_FUNCTIONS: bool | str = 'uppey'
+     """
+     Determines how function names are going to be normalized.
+     Possible values:
