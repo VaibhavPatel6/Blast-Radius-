@@ -248,7 +248,10 @@ def decide_tpc(commit: str, changes, chosen: list[int], tests: list[dict], chang
         return chosen, ""
     paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
     if class_edits or not changed_objects or any(not p.endswith(".py") or p.startswith(REFUSE_PREFIXES) for p in paths):
-        return chosen, " | tpc: kept (patch shape)"
+        # DIAGNOSTIC 3: which parts of the patch-shape rule fired (base 5, summed)
+        parts = (1 if class_edits else 0) + (5 if any(not p.endswith(".py") for p in paths) else 0) \
+            + (25 if any(p.startswith(REFUSE_PREFIXES) for p in paths) else 0) + (125 if not changed_objects else 0)
+        return chosen, f" | tpc: kept (patch shape) [shape-parts={parts}]"
     if any(kind != "function" for _, _, _, kind in changed_objects):
         return chosen, " | tpc: kept (class or module code changed)"
     if _TPC_EXECUTION is None:
@@ -354,6 +357,56 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     return sorted(set(chosen) | set(unmapped)), (how + " | " + "; ".join(reasons))[:400], [t["number"] for t in extras]
 
 
+# DIAGNOSTIC BUILD 3, not an entry. Answers are a1541d3's, except that each commit whose
+# core answer lists test_execute_tpcds and whose TPC check stopped at "patch shape" gets a
+# marker summing the parts that fired: class-body edit 1 ms, non-Python file 5 ms, path under
+# tests/, sqlglot/executor/ or sqlglot/planner.py 25 ms, no changed code 125 ms.
+TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+
+
+def _cost(workers, durations) -> int:
+    occupied = [w for w in workers if w]
+    return (max(sum(durations[n] for n in w) for w in occupied) + WORKER_COST_MS * len(occupied)) if occupied else 0
+
+
+def _subset_sum(durations, unused, target):
+    reach = {0: []}
+    for n in sorted(unused, key=lambda n: (durations[n], n)):
+        d = durations[n]
+        if d == 0 or d > target:
+            continue
+        for total, picked in list(reach.items()):
+            t = total + d
+            if t <= target and t not in reach:
+                reach[t] = picked + [n]
+        if target in reach:
+            return reach[target]
+    return reach.get(target)
+
+
+def diagnostic_shape_marker(commit, workers, durations, why, tests):
+    listed = {n for w in workers for n in w}
+    number = {t["id"]: t["number"] for t in tests}
+    if number.get(TPCDS_ID) not in listed or "[shape-parts=" not in why:
+        return workers
+    ms = int(why.split("[shape-parts=", 1)[1].split("]", 1)[0])
+    if ms == 0:
+        return workers
+    pick = _subset_sum(durations, [n for n in durations if n not in listed], ms)
+    if not pick:
+        log(f"{commit}: DIAGNOSTIC unmarked shape {ms} (no spare tests)")
+        return workers
+    base = _cost(workers, durations)
+    new = [list(w) for w in workers]
+    loads = [sum(durations[n] for n in w) if w else -1 for w in new]
+    new[loads.index(max(loads))].extend(pick)
+    if _cost(new, durations) - base != ms:
+        log(f"{commit}: DIAGNOSTIC unmarked shape {ms} (not exact)")
+        return workers
+    log(f"{commit}: DIAGNOSTIC marker shape {ms}")
+    return new
+
+
 def main() -> int:
     started = time.monotonic()
     commits = sorted(p.stem for p in (DATA / "commits").glob("*.patch"))
@@ -385,6 +438,10 @@ def main() -> int:
             try:
                 chosen, why, extras = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)
+                # DIAGNOSTIC 3: mark the patch-shape parts before free fill (exact cost delta)
+                pre = diagnostic_shape_marker(commit, workers, durations, why, tests)
+                if valid_line(commit, pre, known):
+                    workers = pre
                 zero = [n for n in sorted(durations) if durations[n] == 0]
                 workers = free_fill(workers, extras + zero, durations)
                 log(f"{commit}: {len(chosen)} tests | {why}")
