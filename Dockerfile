@@ -18,5 +18,8 @@ COPY br /app/br
 COPY selector.py /app/selector.py
 RUN python -m compileall -q /app && chmod -R a+rX /app /opt/sqlglot
 
-ENV SKIP_INTEGRATION=0
+# SKIP_INTEGRATION=0 runs the executor tests, as in labeling. sqlglot's tests size
+# process pools from the CPU count, which Docker reports as the host's; one worker
+# keeps our verification cheap and inside the process limit.
+ENV SKIP_INTEGRATION=0 PYTHON_CPU_COUNT=1
 CMD ["python", "/app/selector.py"]
