@@ -1126,16 +1126,70 @@ def set_aside(changes, pinned_tree: str, maps, changed_objects=(), class_edits=(
                 return changes, notes, f"{path} is read by the TPC tests"
             notes.append(f"{path}: never opened by the TPC tests")
             continue
+        new_dirs = _new_package_dirs(changes)
         for p in (ch.old_path, ch.new_path):
             if p is None:
                 continue
             if maps.opened(p) & tpc_ids:
                 return changes, notes, f"{p} is read by the TPC tests"
-            directory = p.rsplit("/", 1)[0] if "/" in p else ""
-            if maps.listed(directory) & tpc_ids:
-                return changes, notes, f"{p} added or removed where the TPC tests list files"
-        notes.append(f"{path}: added or removed where the TPC tests never look")
+            why = _import_visible(p, pinned_tree, new_dirs)
+            # the directory the analyzer charges: the nearest one that exists in the pinned tree
+            ancestor = _nearest_existing_dir(p, pinned_tree)
+            if maps.listed(ancestor) & tpc_ids and why:
+                return changes, notes, f"{p} added or removed where the TPC tests list files, and {why}"
+        notes.append(f"{path}: added or removed, and no import or test run can see it")
     return relevant, notes, None
+
+
+# Files Python or pytest reads by name when they appear in a directory on the way: config
+# and package markers. A file with an importable suffix or a .pth file is never set aside.
+_SEEN_BY_NAME = {"pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "conftest.py",
+                 "sitecustomize.py", "usercustomize.py"}
+
+
+def _nearest_existing_dir(path: str, pinned_tree: str) -> str:
+    """The nearest directory of `path` that exists in the pinned tree ('' for the root),
+    as br.analyze charges an added or removed file to its listers."""
+    parts = path.split("/")[:-1]
+    while parts and not (Path(pinned_tree) / "/".join(parts)).is_dir():
+        parts.pop()
+    return "/".join(parts)
+
+
+def _new_package_dirs(changes) -> set[str]:
+    """Directories the patch makes into packages (it adds an __init__ file in them)."""
+    out = set()
+    for ch in changes:
+        p = ch.new_path or ""
+        if ch.old_path is None and p.rsplit("/", 1)[-1].startswith("__init__."):
+            out.add(p.rsplit("/", 1)[0] if "/" in p else "")
+    return out
+
+
+def _import_visible(path: str, pinned_tree: str, new_package_dirs: set[str]) -> str | None:
+    """Why an added or removed non-Python file could change what an import or a pytest run
+    finds in the directories the TPC tests list (all of them are listed by the import
+    machinery and pytest collection only), or None.
+
+    A file changes what an import finds only if its name can be imported (a suffix in
+    importlib.machinery.all_suffixes(), or a .pth file), or it sits in a directory the patch
+    makes a package. A directory without an __init__ file is at most a namespace portion,
+    and any regular module or package of that name, anywhere on sys.path, takes precedence
+    (PEP 420): a data directory tests/helpers/ cannot shadow tests/helpers.py. pytest and
+    packaging config files are read by name."""
+    import importlib.machinery
+
+    name = path.rsplit("/", 1)[-1]
+    if any(name.endswith(suffix) for suffix in importlib.machinery.all_suffixes()) or name.endswith(".pth"):
+        return f"{name} has an importable suffix"
+    if name in _SEEN_BY_NAME or name.startswith("__init__."):
+        return f"{name} is read by name by Python or pytest"
+    parts = path.split("/")[:-1]
+    for i in range(1, len(parts) + 1):
+        directory = "/".join(parts[:i])
+        if directory in new_package_dirs:
+            return f"{directory} becomes a package"
+    return None
 
 
 def _class_attributes(text: str) -> dict:
@@ -1320,10 +1374,9 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     changed_objects = [c for c in changed_objects if c[0] in kept_paths]
     class_edits = [e for e in class_edits if e["path"] in kept_paths]
     if not changes:
-        if any("expected outputs" in n for n in aside):
-            names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in present)
-            return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] ({'; '.join(aside)[:200]})"
-        return chosen, f" | tpc: kept (nothing explains the candidate: {'; '.join(aside)[:150]})"
+        # every change is one the TPC tests cannot see: they run as on the pinned commit
+        names = ",".join(by_number[n]["id"].rsplit("_", 1)[1] for n in present)
+        return [n for n in chosen if n not in present], f" | tpc: dropped [{names}] ({'; '.join(aside)[:200]})"
     paths = {p for ch in changes for p in (ch.old_path, ch.new_path) if p}
     executor = decide_executor(commit, changes, chosen, present, by_number, changed_objects, class_edits, paths,
                                timeout, work_root, all_changes)

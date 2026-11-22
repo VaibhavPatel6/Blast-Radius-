@@ -1,0 +1,6 @@
+diff --git a/tests/extra.pth b/tests/extra.pth
+new file mode 100644
+--- /dev/null
++++ b/tests/extra.pth
+@@ -0,0 +1,1 @@
++import os

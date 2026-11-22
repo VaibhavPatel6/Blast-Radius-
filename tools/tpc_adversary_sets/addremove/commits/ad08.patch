@@ -1,0 +1,6 @@
+diff --git a/tests/helpers/__init__.py b/tests/helpers/__init__.py
+new file mode 100644
+--- /dev/null
++++ b/tests/helpers/__init__.py
+@@ -0,0 +1,1 @@
++X = 1

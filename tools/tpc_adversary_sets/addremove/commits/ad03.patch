@@ -1,0 +1,7 @@
+diff --git a/tests/pytest.ini b/tests/pytest.ini
+new file mode 100644
+--- /dev/null
++++ b/tests/pytest.ini
+@@ -0,0 +1,2 @@
++[pytest]
++addopts = -k nothing_matches_this
