@@ -126,6 +126,32 @@ class Verifier:
     def __init__(self, started: float):
         self.started = started
         self.preimported = False
+        self.warm = None
+
+    def warm_run(self, commit: str, changes, tests: list[dict]) -> dict:
+        """Run tests in a worker forked from the warm zygote, with patched function bodies
+        swapped in (br/warm.py). The caller has checked the patch is eligible."""
+        from br.verify import WATCHDOG_CLASS_SETUP, WATCHDOG_FACTOR, WATCHDOG_FLOOR
+        from br.warm import Warm
+
+        if self.warm is None:
+            self.warm = Warm()
+        payload = [{"path": ch.old_path, "old": ch.old_text, "new": ch.new_text} for ch in changes]
+        seconds = {t["id"]: t["seconds"] for t in tests}
+        order = sorted(tests, key=lambda t: (t["id"].rsplit("::", 1)[0], t["seconds"]))
+        seen = set()
+
+        def budget(test_id: str, first: bool) -> float:
+            cls = test_id.rsplit("::", 1)[0]
+            extra = WATCHDOG_CLASS_SETUP if cls not in seen else 0.0
+            seen.add(cls)
+            return WATCHDOG_FLOOR + WATCHDOG_FACTOR * seconds[test_id] + extra
+
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        result = self.warm.run(payload, order, budget, self.started + VERIFY_HARD_STOP)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        result["why"] = f"warm cpu {after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime:.2f}s {result['why']}"
+        return result
 
     def has_time(self) -> bool:
         return time.monotonic() - self.started < VERIFY_UNTIL
@@ -214,7 +240,11 @@ def narrow_class_edits(commit: str, changes, class_edits: list[dict], maps, veri
         path = module_file(module)
         if path is None:
             return importers, f"class edits: importers (no file for {module})"
+        wrapped = maps.wrapped(path, qual)
         for name in sorted(names):
+            if wrapped is None or name not in wrapped:
+                # the recorder never instrumented this name, so its readers are unknown
+                return importers, f"class edits: importers ({module}:{qual}.{name} has no read records)"
             got = maps.readers(path, qual, name)
             if got is None:
                 return importers, f"class edits: importers (no read records for {path})"
@@ -321,6 +351,38 @@ def run_cheap_heavy(commit: str, changes, chosen: list[int], tests: list[dict], 
     return chosen, ""
 
 
+def cands_ids_for_warm(ids, tests: list[dict]) -> list[str]:
+    from br.policy import HEAVY_SECONDS
+
+    return [t["id"] for t in tests if t["id"] in ids and t["seconds"] < HEAVY_SECONDS]
+
+
+def warm_eligible(changes, changed_objects: list[tuple], test_ids: list[str], maps) -> tuple[bool, str]:
+    """Whether swapping patched function bodies into a warm process gives exactly the
+    patched behaviour: only edits inside existing Python files, only function bodies that
+    are not nested in other functions and never run at import, and no candidate that
+    starts child processes (they import sqlglot afresh from disk)."""
+    global _IMPORT_TIME
+    for ch in changes:
+        if ch.old_path is None or ch.new_path != ch.old_path or not ch.old_path.endswith(".py"):
+            return False, "not an edit inside an existing Python file"
+        if not ch.old_path.startswith(("sqlglot/", "tests/")):
+            return False, "file outside sqlglot/ and tests/"
+    if not changed_objects:
+        return False, "no changed code"
+    if _IMPORT_TIME is None:
+        _IMPORT_TIME = {tuple(x) for x in json.loads((APP / "maps" / "import_time.json").read_text())}
+    for p, q, n, kind in changed_objects:
+        if kind != "function" or "<locals>" in q:
+            return False, f"{q} is not a top-level function body"
+        if (p, q, n) in _IMPORT_TIME:
+            return False, f"{q} runs at import"
+    for test_id in test_ids:
+        if maps.tests.get(test_id, {}).get("children", 1):
+            return False, f"{test_id} starts child processes"
+    return True, ""
+
+
 def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> tuple[list[int], str, list[int]]:
     """Test numbers to list for one patch, a one-line reason for the log, and the tests a
     wider (function- or importer-level) selection would have added, for free fill."""
@@ -356,8 +418,12 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
         if unexplained:
             can_verify = False
             reasons.append(f"no clearing: {len(unexplained)} touched lines no test ran alone, e.g. {unexplained[0]}")
+    warm_ok, warm_why = warm_eligible(changes, changed_objects, cands_ids_for_warm(ids, tests), maps)
+    if not warm_ok:
+        reasons.append(f"no warm run: {warm_why}")
     data_only = all(not (ch.old_path or ch.new_path or "").endswith(".py") for ch in changes)
-    chosen, how = decide(cands, lambda regular: verifier(commit, changes, regular), can_verify, data_only)
+    chosen, how = decide(cands, lambda regular: verifier.warm_run(commit, changes, regular),
+                         can_verify and warm_ok, data_only)
     by_id = {t["id"]: t for t in tests}
     chosen, how_run = run_cheap_heavy(commit, changes, chosen, tests, verifier, can_verify and not data_only)
     how += how_run

@@ -30,6 +30,7 @@ class Recorder:
         self.listed: set = set()
         self.spawned: set = set()
         self.touched: set = set()  # class bodies (file, qualname, firstlineno) whose attributes were read
+        self.wrapped: set = set()  # (file, qualname, firstlineno, name) actually instrumented
         self.active = False
         self._build_class = None
 
@@ -104,6 +105,7 @@ class Recorder:
                 continue
             try:
                 type.__setattr__(cls, name, Touch(value, name))
+                recorder.wrapped.add((file, qual, first, name))
             except (TypeError, AttributeError):
                 pass
 
@@ -147,6 +149,7 @@ class Recorder:
             "listed": sorted(self.listed),
             "spawned": sorted(self.spawned),
             "touched": sorted(self.touched),
+            "wrapped": sorted(self.wrapped),
         }
 
 
@@ -157,3 +160,4 @@ def merge(into: dict, other: dict) -> None:
     for key in ("opened", "listed", "spawned"):
         into[key] = sorted(set(into[key]) | set(other.get(key, [])))
     into["touched"] = sorted({tuple(c) for c in into.get("touched", [])} | {tuple(c) for c in other.get("touched", [])})
+    into["wrapped"] = sorted({tuple(c) for c in into.get("wrapped", [])} | {tuple(c) for c in other.get("wrapped", [])})
