@@ -81,6 +81,17 @@ _PINNED: dict[str, dict] = {}
 _MAPS: dict[str, object] = {}
 
 
+def _stage_map():
+    """maps/tpc_stages.json when the image has it, else None (then every query that reaches
+    the change at any stage is optimized)."""
+    if "tpc_stages.json" not in _MAPS:
+        try:
+            _MAPS["tpc_stages.json"] = json.loads((_APP / "maps" / "tpc_stages.json").read_text())
+        except (OSError, ValueError):
+            _MAPS["tpc_stages.json"] = None
+    return _MAPS["tpc_stages.json"]
+
+
 def _map(name: str):
     if name not in _MAPS:
         data = json.loads((_APP / "maps" / name).read_text())
@@ -617,9 +628,21 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
     keys = [f"{p}|{q}|{n}" for p, q, n, _ in changed_objects]
     at_import = any((p, q, n) in import_time for p, q, n, _ in changed_objects)
     affected = {b: frozenset(i for k in keys for i in queries.get(b, {}).get(k, [])) for b in set(present.values())}
+    reached = dict(affected)
+    stages = _stage_map()
+    if stages is not None:
+        # Per stage (tools/covmap/tpc_stages.py): only queries whose WORKER stages (unpickle,
+        # optimize, optimized SQL) reach the change need optimizing. A change the main
+        # process alone runs (parse, pickle, DuckDB text) reaches a worker only through the
+        # pickle bytes, which are compared for every query.
+        for b in reached:
+            main = frozenset(i for k in keys for i in stages[b]["main"].get(k, []))
+            worker = frozenset(i for k in keys for i in stages[b]["worker"].get(k, []))
+            reached[b] = affected[b] | main | worker
+            affected[b] = worker
     notes = []
     for n, b in sorted(present.items()):
-        if not affected[b] and not at_import:
+        if not reached[b] and not at_import:
             # the test is a candidate, yet no map says where it runs the change
             notes.append(f"{b} kept: no map explains it")
             del present[n]
@@ -643,7 +666,8 @@ def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_o
         build_tree(tree, changes)
         for n, benchmark in sorted(present.items()):
             same, why = compare(pinned_tree, str(tree), benchmark, timeout, affected[benchmark], renames, at_import)
-            notes.append(f"{benchmark} {why} ({len(affected[benchmark])} queries reach the change)")
+            notes.append(f"{benchmark} {why} ({len(reached[benchmark])} queries reach the change, "
+                         f"{len(affected[benchmark])} in worker stages)")
             if same:
                 dropped.append(n)
     except Exception as error:  # noqa: BLE001

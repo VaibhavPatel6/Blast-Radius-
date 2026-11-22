@@ -1,0 +1,14 @@
+{
+ "sp00": "sqlglot/expressions/core.py:871:64",
+ "sp01": "sqlglot/parser.py:2959:19",
+ "sp02": "sqlglot/expressions/core.py:1228:14",
+ "sp03": "sqlglot/parser.py:7085:16",
+ "sp04": "sqlglot/parser.py:2283:13",
+ "sp05": "sqlglot/optimizer/normalize.py:178:32",
+ "sp06": "sqlglot/parser.py:2784:15",
+ "sp07": "sqlglot/parser.py:4882:56",
+ "su00": "sqlglot/parser.py:7286:11",
+ "su01": "sqlglot/generators/snowflake.py:194:32",
+ "su02": "sqlglot/executor/table.py:34:15",
+ "su03": "sqlglot/generator.py:4865:23"
+}

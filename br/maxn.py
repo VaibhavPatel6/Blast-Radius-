@@ -39,6 +39,8 @@ import tokenize
 from pathlib import Path
 
 TEST_ID = "tests/test_parser.py::TestParser::test_max_nodes"
+# Switched off: the diagnostic showed no practice commit lists test_max_nodes.
+ENABLED = False
 WIDTHS = (10, 40)  # outcomes at both; the width-10 run is the counted one
 COUNT_WIDTH = 10
 MEMORY_WIDTH = 10
@@ -323,13 +325,13 @@ EST_CPU = 1.0
 
 def decide(commit: str, changes, chosen: list[int], tests: list[dict], changed_objects: list[tuple],
            class_edits: list, maps, pinned_tree: str, timeout: float, log=lambda message: None,
-           work_root: str = "/tmp/br", saving_ms=None, enabled: bool = True) -> tuple[list[int], str]:
+           work_root: str = "/tmp/br", saving_ms=None, enabled: bool | None = None) -> tuple[list[int], str]:
     """(tests still listed, a note for the log) for one patch."""
     from br.verify import build_tree, remove_tree
 
     by_number = {t["number"]: t for t in tests}
     hit = [n for n in chosen if by_number[n]["id"] == TEST_ID]
-    if not hit or not enabled:
+    if not hit or not (ENABLED if enabled is None else enabled):
         return chosen, ""
     why = static_refusal(changes, changed_objects, class_edits)
     if why:

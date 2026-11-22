@@ -83,7 +83,7 @@ def main() -> int:
             decided += 1
             c0, w0 = cpu(), time.monotonic()
             kept, how = maxn.decide(commit, changes, [number], tests, changed_objects, class_edits, maps,
-                                    str(PINNED), 120)
+                                    str(PINNED), 120, enabled=True)
             dropped = number not in kept
             drops += dropped
             missed = dropped and fails
