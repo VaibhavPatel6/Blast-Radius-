@@ -36,6 +36,9 @@ ALWAYS_UNBOUNDED = {"conftest.py", "pytest.ini", ".pytest.ini", "pytest.toml", "
 # Top-level folders of the pinned tree (a new file inside one of these is not at the root).
 TOP_LEVEL = {"benchmarks", "pdoc", "posts", "sqlglot", "sqlglot-integration-tests", "sqlglotc", "tests",
              ".github"}
+# unittest fixture methods: they run around tests and can leave shared state behind.
+FIXTURE_NAMES = {"setUp", "tearDown", "setUpClass", "tearDownClass", "setUpModule", "tearDownModule",
+                 "addCleanup", "doCleanups", "addClassCleanup", "doClassCleanups"}
 # Files that can hold a pytest section; only that section matters to the test run.
 CONFIG_FILES = {"setup.cfg", "pyproject.toml"}
 
@@ -172,8 +175,12 @@ def _listing_dir(path: str, is_dir) -> str:
     return directory
 
 
-def candidates(changes, maps: Maps, is_dir) -> tuple[set[str], list[str]]:
-    """is_dir(relative path) says whether a directory exists in the pinned tree."""
+def candidates(changes, maps: Maps, is_dir, class_edits: list | None = None) -> tuple[set[str], list[str]]:
+    """is_dir(relative path) says whether a directory exists in the pinned tree.
+
+    With `class_edits` (a list), a changed class body does not add its importers to the
+    result; instead {"path", "qualname", "importers"} is appended there, so the caller can
+    narrow it with a state comparison (br/state.py) or fall back to the importers."""
     found: set[str] = set()
     reasons: list[str] = []
     for ch in changes:
@@ -203,13 +210,14 @@ def candidates(changes, maps: Maps, is_dir) -> tuple[set[str], list[str]]:
         else:
             parts = [(ch.old_path or ch.new_path, ch.old_text, ch.new_text)]
         for path, old, new in parts:
-            got, why = _file_candidates(path, old, new, maps, is_dir)
+            got, why = _file_candidates(path, old, new, maps, is_dir, class_edits)
             found |= got
             reasons.append(f"{path}: {why} -> {len(got)}")
     return found, reasons
 
 
-def _file_candidates(path: str, old: str | None, new: str | None, maps: Maps, is_dir) -> tuple[set[str], str]:
+def _file_candidates(path: str, old: str | None, new: str | None, maps: Maps, is_dir,
+                     class_edits: list | None = None) -> tuple[set[str], str]:
     out: set[str] = set()
     if old is not None and new is not None and old == new:
         return out, "unchanged"
@@ -243,6 +251,20 @@ def _file_candidates(path: str, old: str | None, new: str | None, maps: Maps, is
     changed = changed_code_objects(old_code, new_code)
     if not changed:
         return out, "inert (code objects identical)"
+    if path.startswith("tests/"):
+        # A test's fixtures and module- or class-level code can leave state behind for
+        # tests that never enter them (one team saw a test-file edit break 223 tests).
+        # Only edits confined to ordinary test methods and helpers stay bounded.
+        for c in changed:
+            name = c.co_qualname.rsplit(".", 1)[-1]
+            if c is old_code or not (c.co_flags & 0x01) or name in FIXTURE_NAMES:
+                raise Unbounded(f"{path}: {c.co_qualname} can leave state for other tests")
+    module_changed = any(c is old_code for c in changed)
     for c in changed:
-        out |= maps.entered(path, c.co_qualname, c.co_firstlineno)
+        entrants = maps.entered(path, c.co_qualname, c.co_firstlineno)
+        is_class_body = c is not old_code and not (c.co_flags & 0x01)  # CO_OPTIMIZED marks functions
+        if is_class_body and class_edits is not None and not module_changed:
+            class_edits.append({"path": path, "qualname": c.co_qualname, "importers": entrants})
+        else:
+            out |= entrants
     return out, f"{len(changed)} code objects changed: " + ",".join(c.co_qualname for c in changed[:4])

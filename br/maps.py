@@ -45,5 +45,17 @@ class Maps:
         e = self._file(path)
         return self._ids(e["lines"].get(str(line))) if e else set()
 
+    def readers(self, path: str, qualname: str, attribute: str) -> set[str] | None:
+        """Tests that read `attribute` from the dict of class `qualname` (defined in `path`),
+        or None when the maps hold no read records for that file at all."""
+        e = self._file(path)
+        if not e or "touched" not in e or not e["touched"]:
+            return None
+        out: set[str] = set()
+        for key, names in e["touched"].items():
+            if key.rsplit("@", 1)[0] == qualname and attribute in names:
+                out |= self._ids(names[attribute])
+        return out
+
     def listed(self, directory: str) -> set[str]:
         return self._ids(self._listed.get(directory))
