@@ -112,6 +112,9 @@ CLASS_LEVEL = True
 
 _APP = Path(__file__).resolve().parent.parent
 _PINNED: dict[str, dict] = {}
+# Queries that read a changed class attribute during execution, collected by
+# unread_differences for the subset run (reset by compare).
+_READ_QUERIES: set = set()
 _MAPS: dict[str, object] = {}
 
 
@@ -258,7 +261,8 @@ def _effects(code: types.CodeType):
     # containers built (a list turned into a set changes iteration order with the hash seed)
     # and the types of constants (a tuple constant turned into a frozenset)
     containers = collections.Counter(ins.opname for ins in instructions if ins.opname in _CONTAINER_OPS)
-    const_types = collections.Counter(type(c).__name__ for c in code.co_consts if not isinstance(c, types.CodeType))
+    # a set: equal constants are stored once, so a count changes with an ordinary edit
+    const_types = frozenset(type(c).__name__ for c in code.co_consts if not isinstance(c, types.CodeType))
     return names, stores, inplace, (copy_values, consts), containers, const_types
 
 
@@ -808,6 +812,37 @@ def _reads():
     return _MAPS["tpc_reads.json"]
 
 
+def _reads_queries():
+    """maps/tpc_reads_queries.json (runner session, tools/covmap/tpc_reads_queries.py):
+    per executed TPC-DS query, the class attributes its execution parts read, each query in
+    its own fork after imports, setUpClass and the pool initializer. ({(module, qual, name):
+    set of queries}, set of attributes read by set-up) or None."""
+    if "tpc_reads_queries.json" not in _MAPS:
+        try:
+            data = json.loads((_APP / "maps" / "tpc_reads_queries.json").read_text())
+            per = {tuple(k.split("|", 2)): set(v) for k, v in data["tpc-ds"]["execution"].items()}
+            setup = {tuple(k.split("|", 2)) for k in data.get("setup_reads", [])}
+            _MAPS["tpc_reads_queries.json"] = (per, setup)
+        except (OSError, ValueError, KeyError):
+            _MAPS["tpc_reads_queries.json"] = None
+    return _MAPS["tpc_reads_queries.json"]
+
+
+def _runnable_read(key: tuple) -> set | None:
+    """The queries whose execution reads class attribute `key`, when a subset run can decide
+    a change to it: subset execution is on, the per-query record has the attribute, set-up
+    does not read it, and at most RUN_LIMIT queries do. Else None."""
+    if not RUN_LIMIT:
+        return None
+    record = _reads_queries()
+    if record is None:
+        return None
+    per, setup = record
+    if key in setup or key not in per or len(per[key]) > RUN_LIMIT:
+        return None
+    return per[key]
+
+
 def unread_differences(row: dict, pin: dict) -> tuple[bool, str]:
     """For a class or module edit: whether every attribute whose import-time value differs
     is a class attribute the recorder instruments and the execution parts never read. A
@@ -850,7 +885,10 @@ def unread_differences(row: dict, pin: dict) -> tuple[bool, str]:
             if (module, qual, name) not in instrumented:
                 return False, f"{key}.{name} changed and its reads are not recorded"
             if (module, qual, name) in read:
-                return False, f"{key}.{name} changed and is read during execution"
+                queries = _runnable_read((module, qual, name))
+                if queries is None:
+                    return False, f"{key}.{name} changed and is read during execution"
+                _READ_QUERIES.update(queries)  # decided by running the queries that read it
             changed.append(f"{qual}.{name}")
     return True, f"changed only {', '.join(changed[:4])}{' ...' if len(changed) > 4 else ''}, never read during execution"
 
@@ -878,10 +916,15 @@ def compare(pinned_tree: str, patched_tree: str, benchmark: str, timeout: float,
                 if row.get("modules") != pin.get("modules"):
                     return False, "loaded modules differ"
                 if allow_unread and len(rows) == len(expected):
+                    _READ_QUERIES.clear()
                     ok, why = unread_differences(row, pin)
                     if not ok:
                         return False, f"import state differs: {why}"
                     verdict = f"same queries; import state {why}"
+                    if _READ_QUERIES and benchmark == "tpc-ds":
+                        differing = sorted(set(differing) | _READ_QUERIES)
+                        if len(differing) > RUN_LIMIT:
+                            return False, f"{len(differing)} queries read a changed attribute or prepare differently"
                     break
                 keys = sorted(k for k in set(row["state"]) | set(pin["state"])
                               if row["state"].get(k) != pin["state"].get(k))
@@ -1260,7 +1303,7 @@ def early_class_refusal(changes) -> str | None:
             return None
         module = ch.old_path[:-3].replace("/", ".").removesuffix(".__init__")
         for key in set(old) | set(new):
-            if old.get(key) != new.get(key) and (module, *key) in read:
+            if old.get(key) != new.get(key) and (module, *key) in read and _runnable_read((module, *key)) is None:
                 return f"{key[0]}.{key[1]} changed and is read during execution"
     return None
 
