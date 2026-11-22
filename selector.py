@@ -233,23 +233,52 @@ def narrow_class_edits(commit: str, changes, class_edits: list[dict], maps, veri
         remove_tree(tree)
     if changed is None:
         return importers, "class edits: importers (an import failed or timed out)"
+    readers, problem = _readers_of(changed, maps, run_only=False)
+    if problem:
+        return importers, problem
+    note = f"class edits: {sum(len(v) for v in changed.values())} attributes changed in {len(changed)} classes -> {len(readers)} readers"
+    # Reads made at import (a metaclass or class body consuming the value) leave their
+    # results in class and module state. If every sqlglot module, imported on both sides,
+    # shows no difference beyond attributes whose test-time readers we know, only those
+    # test-time readers can observe the change.
+    run_readers, problem = _readers_of(changed, maps, run_only=True)
+    if problem or run_readers == readers or not verifier.has_time():
+        return readers, note
+    tree = Path("/tmp/br") / (commit + "-state-all")
+    try:
+        remove_tree(tree)
+        build_tree(tree, changes)
+        everything = changed_attributes(str(PINNED), str(tree), ["*"], PROBE_TIMEOUT)
+    except Exception:
+        everything = None
+    finally:
+        remove_tree(tree)
+    if everything is None:
+        return readers, note
+    run_all, problem = _readers_of(everything, maps, run_only=True)
+    if problem:
+        return readers, note + " (full import: " + problem + ")"
+    return run_all, note + f"; full-import comparison: {len(run_all)} test-time readers"
+
+
+def _readers_of(changed: dict, maps, run_only: bool) -> tuple[set[str], str]:
     readers: set[str] = set()
     for (module, qual), names in sorted(changed.items()):
         if "*" in names or "__kind__" in names:
-            return importers, f"class edits: importers ({module}:{qual} gained or lost a member)"
+            return set(), f"class edits: importers ({module}:{qual} gained or lost a member)"
         path = module_file(module)
         if path is None:
-            return importers, f"class edits: importers (no file for {module})"
+            return set(), f"class edits: importers (no file for {module})"
         wrapped = maps.wrapped(path, qual)
         for name in sorted(names):
             if wrapped is None or name not in wrapped:
                 # the recorder never instrumented this name, so its readers are unknown
-                return importers, f"class edits: importers ({module}:{qual}.{name} has no read records)"
-            got = maps.readers(path, qual, name)
+                return set(), f"class edits: importers ({module}:{qual}.{name} has no read records)"
+            got = maps.readers_run(path, qual, name) if run_only else maps.readers(path, qual, name)
             if got is None:
-                return importers, f"class edits: importers (no read records for {path})"
+                return set(), f"class edits: importers (no read records for {path})"
             readers |= got
-    return readers, f"class edits: {sum(len(v) for v in changed.values())} attributes changed in {len(changed)} classes -> {len(readers)} readers"
+    return readers, ""
 
 
 def answer_cost(numbers: list[int], durations: dict[int, int]) -> int:

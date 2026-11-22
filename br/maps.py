@@ -57,6 +57,18 @@ class Maps:
                 out |= self._ids(names[attribute])
         return out
 
+    def readers_run(self, path: str, qualname: str, attribute: str) -> set[str] | None:
+        """Like `readers`, counting only reads made outside imports (by the test itself or
+        code it calls), or None when the maps hold no such records for the file."""
+        e = self._file(path)
+        if not e or not e.get("touched_run"):
+            return None
+        out: set[str] = set()
+        for key, names in e["touched_run"].items():
+            if key.rsplit("@", 1)[0] == qualname and attribute in names:
+                out |= self._ids(names[attribute])
+        return out
+
     def wrapped(self, path: str, qualname: str) -> set[str] | None:
         """Attribute names the read recorder actually instrumented on that class, or None."""
         e = self._file(path)
