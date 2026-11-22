@@ -33,6 +33,9 @@ class Unbounded(Exception):
 # Files pytest or the interpreter read on their own, wherever they sit in the tree.
 ALWAYS_UNBOUNDED = {"conftest.py", "pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml", "tox.ini",
                     "sitecustomize.py", "usercustomize.py"}
+# Top-level folders of the pinned tree (a new file inside one of these is not at the root).
+TOP_LEVEL = {"benchmarks", "pdoc", "posts", "sqlglot", "sqlglot-integration-tests", "sqlglotc", "tests",
+             ".github"}
 # Files that can hold a pytest section; only that section matters to the test run.
 CONFIG_FILES = {"setup.cfg", "pyproject.toml"}
 
@@ -112,10 +115,20 @@ def changed_code_objects(old: types.CodeType, new: types.CodeType) -> list[types
     return changed
 
 
+# A changed Python file larger than this is not compiled (compiling a huge file can
+# take gigabytes); the commit lists every test instead. sqlglot's largest file is ~0.4 MB.
+MAX_PY_BYTES = 2_000_000
+
+
 def _compile(text: str, path: str):
+    """Compile the file the way import does: from bytes, so a coding declaration or a
+    byte-order mark takes effect exactly as it would for Python's import system."""
+    data = text.encode("utf-8")
+    if len(data) > MAX_PY_BYTES:
+        raise Unbounded(f"{path}: {len(data)} bytes is too large to analyse")
     try:
-        return compile(text, "/src/" + path, "exec", dont_inherit=True)
-    except (SyntaxError, ValueError):
+        return compile(data, "/src/" + path, "exec", dont_inherit=True)
+    except (SyntaxError, ValueError, UnicodeDecodeError, LookupError, MemoryError, RecursionError):
         return None
 
 
@@ -151,6 +164,11 @@ def candidates(changes, maps: Maps) -> tuple[set[str], list[str]]:
             if name in ALWAYS_UNBOUNDED or path.endswith(".pth"):
                 raise Unbounded(f"{path} is read by pytest or the interpreter on its own")
             added_or_removed = (path == ch.new_path and ch.old_path != path) or (path == ch.old_path and ch.new_path != path)
+            added = path == ch.new_path and ch.old_path != path
+            if added and ("/" not in path or path.split("/", 1)[0] not in TOP_LEVEL):
+                # The repository root is on sys.path (before site-packages) and is scanned
+                # for package metadata: a new file or folder there can shadow any import.
+                raise Unbounded(f"{path}: new entry at the repository root")
             if added_or_removed and _pytest_collects(path):
                 # pytest imports every collected test file before any test runs, so a new
                 # one can change state every test sees; a removed one changes the set.

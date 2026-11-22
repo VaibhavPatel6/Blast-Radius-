@@ -33,7 +33,9 @@ def main() -> int:
             if not d["ok"]:
                 print(f"warning: {tid} did not pass in our runner: {str(d.get('error'))[:200]}", file=sys.stderr)
             r = records.setdefault(tid, {"lines": {}, "code": set(), "opened": set(), "listed": set(),
-                                         "spawned": set(), "cpu": 0.0, "ok": True, "children": 0})
+                                         "spawned": set(), "cpu": 0.0, "ok": True, "children": 0,
+                                         "touched": set()})
+            r["touched"].update(tuple(c) for c in d.get("touched", []))
             for f, ls in d["lines"].items():
                 r["lines"].setdefault(f, set()).update(ls)
             r["code"].update(tuple(c) for c in d["code"])
@@ -62,7 +64,7 @@ def main() -> int:
     per_file: dict[str, dict] = {}
 
     def entry(path: str) -> dict:
-        return per_file.setdefault(rel(path), {"lines": {}, "code": {}, "opened": set()})
+        return per_file.setdefault(rel(path), {"lines": {}, "code": {}, "opened": set(), "touched": {}})
 
     listed: dict[str, set] = {}
     for tid, r in records.items():
@@ -75,6 +77,8 @@ def main() -> int:
             entry(f)["code"].setdefault(f"{qual}@{first}", set()).add(i)
         for f in r["opened"]:
             entry(f)["opened"].add(i)
+        for f, qual, first, name in r["touched"]:
+            entry(f)["touched"].setdefault(f"{qual}@{first}", {}).setdefault(name, set()).add(i)
         for d in r["listed"]:
             listed.setdefault(d[len(PREFIX):] if d.startswith(PREFIX) else "", set()).add(i)
 
@@ -86,6 +90,8 @@ def main() -> int:
             "lines": {str(k): intern(v) for k, v in sorted(e["lines"].items())},
             "code": {k: intern(v) for k, v in sorted(e["code"].items())},
             "opened": intern(e["opened"]),
+            "touched": {k: {n: intern(v) for n, v in sorted(names.items())}
+                        for k, names in sorted(e["touched"].items())},
         }, separators=(",", ":")))
     (out / "index.json").write_text(json.dumps({
         "ids": ids,

@@ -75,6 +75,8 @@ def _safe_path(path: str) -> str:
 
 
 def parse(text: str) -> list[_FilePatch]:
+    if text and not text.endswith("\n"):
+        text += "\n"  # a patch cut just before its final newline: GNU patch accepts it too
     lines = _lines(text)
     files: list[_FilePatch] = []
     current: _FilePatch | None = None

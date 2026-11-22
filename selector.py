@@ -26,6 +26,12 @@ WORKER_COST_MS = 2000  # the scorer charges 2 s for every non-empty worker
 # VERIFY_HARD_STOP; the remaining commits list their candidates without running them.
 # 0 for now: verification stays off until the server's CPU speed is measured (E5).
 VERIFY_UNTIL = 0
+# Patches larger than this are not read; the commit lists every test. Real patches
+# are a few kilobytes, and parsing many megabytes could exhaust memory or time.
+MAX_PATCH_BYTES = 2_000_000
+# After this many seconds, remaining commits list every test without analysis, so
+# the whole batch always finishes inside the 3-minute limit.
+ANALYSIS_DEADLINE = 140
 VERIFY_HARD_STOP = 120
 
 
@@ -137,8 +143,12 @@ def select(commit: str, tests: list[dict], known: set[str], maps, verifier) -> t
     from br.policy import decide
 
     everything = [t["number"] for t in tests]
+    patch_path = DATA / "commits" / f"{commit}.patch"
     try:
-        text = (DATA / "commits" / f"{commit}.patch").read_bytes().decode("utf-8")
+        size = patch_path.stat().st_size
+        if size > MAX_PATCH_BYTES:
+            return everything, f"all tests: patch is {size} bytes"
+        text = patch_path.read_bytes().decode("utf-8")
         changes = apply(text, read_pinned)
         ids, reasons = candidates(changes, maps)
     except (PatchError, Unbounded, UnicodeDecodeError) as error:
@@ -175,7 +185,9 @@ def main() -> int:
     lines = []
     for commit in commits:
         workers = everything
-        if maps is not None:
+        if maps is not None and time.monotonic() - started > ANALYSIS_DEADLINE:
+            log(f"{commit}: out of time; listing every test")
+        elif maps is not None:
             try:
                 chosen, why = select(commit, tests, mapped, maps, verifier)
                 workers = pack(chosen, durations)

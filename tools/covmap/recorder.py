@@ -7,8 +7,11 @@ full speed. An audit hook (sys.addaudithook) sees file opens, directory listings
 process starts. Audit hooks cannot be removed, which is fine in a throwaway process.
 """
 
+import builtins
+import enum
 import os
 import sys
+import types
 
 M = sys.monitoring
 TOOL = M.COVERAGE_ID
@@ -26,7 +29,9 @@ class Recorder:
         self.opened: set = set()
         self.listed: set = set()
         self.spawned: set = set()
+        self.touched: set = set()  # class bodies (file, qualname, firstlineno) whose attributes were read
         self.active = False
+        self._build_class = None
 
     def _line(self, code, line):
         f = code.co_filename
@@ -65,7 +70,64 @@ class Recorder:
         elif event in _SPAWN_EVENTS:
             self.spawned.add(event)
 
+    def _instrument(self, cls, body):
+        """Replace each attribute defined in a sqlglot class with a stand-in that records
+        the first read of that attribute (through the class, a subclass or an instance)
+        and then puts the original back. Dunder names, data descriptors (properties,
+        slots) and enums are left alone."""
+        if isinstance(cls, enum.EnumMeta):
+            return
+        file, qual, first = body.co_filename, body.co_qualname, body.co_firstlineno
+        recorder = self
+
+        class Touch:
+            __slots__ = ("value", "name")
+
+            def __init__(self, value, name):
+                self.value = value
+                self.name = name
+
+            def __get__(self, instance, owner=None):
+                if recorder.active:
+                    recorder.touched.add((file, qual, first, self.name))
+                value = self.value
+                if cls.__dict__.get(self.name) is self:
+                    type.__setattr__(cls, self.name, value)
+                getter = getattr(type(value), "__get__", None)
+                return getter(value, instance, owner) if getter is not None else value
+
+        for name, value in list(cls.__dict__.items()):
+            if name.startswith("__") and name.endswith("__"):
+                continue
+            if hasattr(type(value), "__set__") or isinstance(value, (types.MemberDescriptorType,
+                                                                     types.GetSetDescriptorType)):
+                continue
+            try:
+                type.__setattr__(cls, name, Touch(value, name))
+            except (TypeError, AttributeError):
+                pass
+
+    def _install_class_hook(self):
+        original = builtins.__build_class__
+        self._build_class = original
+        prefix = self.prefix + "sqlglot/"
+        recorder = self
+
+        def build_class(func, name, *bases, **kwargs):
+            cls = original(func, name, *bases, **kwargs)
+            try:
+                body = func.__code__
+                if body.co_filename.startswith(prefix) and isinstance(cls, type):
+                    recorder._instrument(cls, body)
+            except Exception:  # never let recording change behaviour
+                pass
+            return cls
+
+        builtins.__build_class__ = build_class
+
     def start(self):
+        if os.environ.get("COVMAP_CLASSES") == "1":
+            self._install_class_hook()
         M.use_tool_id(TOOL, "covmap")
         M.register_callback(TOOL, M.events.LINE, self._line)
         M.register_callback(TOOL, M.events.PY_START, self._start)
@@ -84,6 +146,7 @@ class Recorder:
             "opened": sorted(self.opened),
             "listed": sorted(self.listed),
             "spawned": sorted(self.spawned),
+            "touched": sorted(self.touched),
         }
 
 
@@ -93,3 +156,4 @@ def merge(into: dict, other: dict) -> None:
     into["code"] = sorted({tuple(c) for c in into["code"]} | {tuple(c) for c in other.get("code", [])})
     for key in ("opened", "listed", "spawned"):
         into[key] = sorted(set(into[key]) | set(other.get(key, [])))
+    into["touched"] = sorted({tuple(c) for c in into.get("touched", [])} | {tuple(c) for c in other.get("touched", [])})

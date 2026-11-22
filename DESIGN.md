@@ -41,6 +41,11 @@ processing time first"), computes the scorer's cost in whole milliseconds, and k
 the cheapest. For all 1,620 tests the best is 4 workers at 36.817 s: the 28.8 s
 `test_max_nodes` sits alone on one worker and the rest fit beside it.
 
+**Limits.** A patch over 2 MB, or a changed Python file over 2 MB, is not analysed
+(compiling a huge file can take gigabytes of memory); that commit lists every test.
+After 140 seconds the remaining commits list every test without analysis, so the
+batch always finishes inside the 3-minute limit.
+
 **Output safety.** Every line is checked against the scorer's own rules (known test
 numbers, no repeats, at most 8 workers) before anything is printed, and all lines are
 written in one go at the end. Logs go to stderr only. A wrong line on stdout would void
@@ -82,7 +87,8 @@ during mapping, and its record is merged into the test's.
 
 For each changed file:
 
-- **Python files**: compile the old and new text and compare the two trees of code
+- **Python files**: compile the old and new file *from bytes*, exactly as import does
+  (so a `# coding:` comment or a byte-order mark has its real effect), and compare the two trees of code
   objects, ignoring line numbers. A comment or blank line moves code but changes no
   code object, so it affects nothing. For each code object whose own instructions,
   constants or names changed, the candidates are the tests that entered it. A changed
@@ -94,6 +100,9 @@ For each changed file:
   own line number (`__firstlineno__`) is ignored when nothing else uses it.
 - **Other files** (fixtures, data): the tests that opened that file.
 - **Added files**: the tests that listed that directory.
+- **A new file or folder at the repository root**: the root is on Python's import
+  path ahead of the installed packages and is scanned for package metadata, so a new
+  `something.py` there can shadow any import. Every test is listed.
 - **Test files added or removed** (`tests/**/test_*.py`, `*_test.py`, `__init__.py`):
   pytest imports every test file before running any test, so a new one could change
   state that every test sees. Every test is listed.

@@ -45,7 +45,18 @@ def label_one(patch: Path, args, tests) -> dict:
            # sqlglot's tests size process pools from the CPU count; Docker reports the host's.
            "-e", f"PYTHON_CPU_COUNT={args.cpu_count}", "--cpus", str(args.cpus), "--memory", args.memory,
            f"br-dev:{args.arch}", "python", "-m", "pytest", "-p", "outcome_plugin", "-p", "no:cacheprovider",
-           "-n", str(args.n), "-q", "--timeout", str(args.timeout), "tests"]
+           "-n", str(args.n), "-q", "--continue-on-collection-errors", "--timeout", str(args.timeout)]
+    # Focused mode: only these test ids (candidates); otherwise the whole suite.
+    only = args.only.get(cid) if args.only is not None else "ALL"
+    if only == "ALL" or only is None:
+        cmd.append("tests")
+        scope = tests
+    else:
+        if not only:
+            shutil.rmtree(work, ignore_errors=True)
+            return {"commit": cid, "failing": [], "focused": 0, "seconds": 0, "pytest_exit": 0, "unseen": []}
+        cmd.extend(only)
+        scope = [t for t in tests if t["id"] in set(only)]
     run = subprocess.run(cmd, capture_output=True, text=True)
     (work.parent / f"{cid}.log").write_text(run.stdout[-200000:] + "\n--stderr--\n" + run.stderr[-50000:])
     failed, seen, collect_errors = set(), set(), set()
@@ -59,7 +70,7 @@ def label_one(patch: Path, args, tests) -> dict:
                 "detail": run.stdout[-1500:]}
     numbers = set()
     unseen = []
-    for t in tests:
+    for t in scope:
         tid = t["id"]
         if tid in failed or any(tid == ce or tid.startswith(ce + "::") or t["file"] == ce for ce in collect_errors):
             numbers.add(t["number"])
@@ -70,7 +81,8 @@ def label_one(patch: Path, args, tests) -> dict:
         shutil.rmtree(work, ignore_errors=True)
     return {"commit": cid, "failing": sorted(numbers), "collect_errors": sorted(collect_errors),
             "unseen": unseen, "pytest_exit": run.returncode, "seconds": round(time.time() - started, 1),
-            "unknown_failed_ids": sorted(failed - {t["id"] for t in tests})}
+            "unknown_failed_ids": sorted(failed - {t["id"] for t in tests}),
+            "focused": None if scope is tests else len(scope)}
 
 
 def main() -> int:
@@ -87,9 +99,11 @@ def main() -> int:
     ap.add_argument("--memory", default="3g")
     ap.add_argument("--work", type=Path, default=DEFAULT_WORK)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--only", type=Path, help="JSON {commit: [test ids] or 'ALL'} from tools/candidates_json.py")
     args = ap.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
     tests = json.loads(args.tests.read_text())["tests"]
+    args.only = json.loads(args.only.read_text()) if args.only else None
     results = json.loads(args.out.read_text()) if args.out.exists() else {}
     todo = [p for p in args.patches if p.stem not in results]
     with cf.ThreadPoolExecutor(args.j) as pool:
